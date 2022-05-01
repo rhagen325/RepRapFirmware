@@ -101,6 +101,7 @@ private:
 
 	// File I/O
 	Mutex fileMutex;													// locked while a file operation is performed
+	unsigned int numOpenFiles;
 	BinarySemaphore fileSemaphore;										// resolved when the requested file operation has finished
 
 	enum class FileOperation {
@@ -138,6 +139,8 @@ private:
 	void ExchangeData() noexcept;											// Exchange data between RRF and the SBC
 	[[noreturn]] void ReceiveAndStartIap(const char *iapChunk, size_t length) noexcept;	// Receive and start the IAP binary
 	void InvalidateResources() noexcept;									// Invalidate local resources on connection errors
+	void DefragmentBufferedCodes() noexcept;								// Attempt to defragment the code buffer ring to avoid stalls
+	bool DefragmentCodeBlock(uint16_t start, volatile uint16_t &end) noexcept;	// Defragment a specific code buffer region returning true if anything was defragmented
 	void InvalidateBufferedCodes(GCodeChannel channel) noexcept;           	// Invalidate every buffered G-code of the corresponding channel from the buffer ring
 };
 

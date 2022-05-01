@@ -1567,15 +1567,21 @@ GCodeResult GCodes::ConfigureLocalDriverBasicParameters(GCodeBuffer& gb, const S
 						drive,
 						(platform.GetDirectionValue(drive)) ? "forwards" : "in reverse",
 						(platform.GetEnableValue(drive) > 0) ? "high" : "low");
-		float timings[4];
-		const bool isSlowDriver = platform.GetDriverStepTiming(drive, timings);
-		if (isSlowDriver)
 		{
-			reply.catf("%.1f:%.1f:%.1f:%.1fus", (double)timings[0], (double)timings[1], (double)timings[2], (double)timings[3]);
-		}
-		else
-		{
-			reply.cat("fast");
+			float timings[4];
+			const bool isSlowDriver = platform.GetDriverStepTiming(drive, timings);
+			if (isSlowDriver)
+			{
+				reply.catf("%.1f:%.1f:%.1f:%.1fus", (double)timings[0], (double)timings[1], (double)timings[2], (double)timings[3]);
+#ifdef DUET3_MB6XD
+				platform.GetActualDriverTimings(timings);
+				reply.catf(" (actual %.1f:%.1f:%.1f:%.1fus)", (double)timings[0], (double)timings[1], (double)timings[2], (double)timings[3]);
+#endif
+			}
+			else
+			{
+				reply.cat("fast");
+			}
 		}
 
 #if HAS_SMART_DRIVERS
@@ -1874,6 +1880,7 @@ GCodeResult GCodes::RaiseEvent(GCodeBuffer& gb, const StringRef &reply) THROWS(G
 	String<StringLength50> temp;
 	gb.MustSee('E');
 	gb.GetQuotedString(temp.GetRef(), false);
+	temp.ReplaceAll('-', '_');
 	const EventType et(temp.c_str());
 	if (!et.IsValid())
 	{
@@ -1911,6 +1918,8 @@ void GCodes::ProcessEvent(GCodeBuffer& gb) noexcept
 	// Get the name of the macro file that we should look for
 	String<StringLength50> macroName;
 	Event::GetMacroFileName(macroName.GetRef());
+
+#if HAS_MASS_STORAGE || HAS_SBC_INTERFACE || HAS_EMBEDDED_FILES
 	if (platform.SysFileExists(macroName.c_str()))
 	{
 		// Set up the macro parameters
@@ -1925,6 +1934,7 @@ void GCodes::ProcessEvent(GCodeBuffer& gb) noexcept
 			return;
 		}
 	}
+#endif
 
 	// We didn't execute the macro, so do the default action
 	if (Event::GetDefaultPauseReason() == PrintPausedReason::dontPause)

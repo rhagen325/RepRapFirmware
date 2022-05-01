@@ -94,6 +94,7 @@ inline Event::Event(Event *_ecv_null p_next, EventType et, uint16_t p_param, uin
 	if (ep != nullptr && ep->isBeingProcessed)
 	{
 		fname.copy(ep->type.ToString());
+		fname.ReplaceAll('_', '-');
 		fname.cat(".g");
 	}
 }

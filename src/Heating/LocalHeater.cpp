@@ -190,8 +190,8 @@ GCodeResult LocalHeater::SwitchOn(const StringRef& reply) noexcept
 	}
 
 	const float target = GetTargetTemperature();
-	const HeaterMode newMode = (temperature + TEMPERATURE_CLOSE_ENOUGH < target) ? HeaterMode::heating
-								: (temperature > target + TEMPERATURE_CLOSE_ENOUGH) ? HeaterMode::cooling
+	const HeaterMode newMode = (temperature + TemperatureCloseEnough < target) ? HeaterMode::heating
+								: (temperature > target + TemperatureCloseEnough) ? HeaterMode::cooling
 									: HeaterMode::stable;
 	if (newMode != mode)
 	{
@@ -290,7 +290,7 @@ void LocalHeater::Spin() noexcept
 			{
 			case HeaterMode::heating:
 				{
-					if (error <= TEMPERATURE_CLOSE_ENOUGH)
+					if (error <= TemperatureCloseEnough)
 					{
 						mode = HeaterMode::stable;
 						heatingFaultCount = 0;
@@ -307,14 +307,15 @@ void LocalHeater::Spin() noexcept
 						else if (gotDerivative)												// this is a check in case we just had a temperature spike
 						{
 							const float expectedRate = GetExpectedHeatingRate();
-							const float minSamplingInterval = 3.0/expectedRate;				// check the temperature if we expect a 3C rise since last time
+							const float minSamplingInterval = 3.0/expectedRate;				// only check the temperature when we expect at least 3C rise since last time
 							const float actualInterval = (float)(now - lastTemperatureMillis) * MillisToSeconds;
 							if (actualInterval >= minSamplingInterval)
 							{
 								// Check that we are heating fast enough, and if so, take another sample
 								const float expectedTemperatureRise = expectedRate * actualInterval;
 								const float actualTemperatureRise = temperature - lastTemperatureValue;
-								if (actualTemperatureRise < expectedTemperatureRise * 0.5)
+								// Bed heaters sometimes have much slower long term heating rates than their short term heating rates, so allow them a lower measured heating rate
+								if (actualTemperatureRise < expectedTemperatureRise * ((IsBedOrChamber()) ? MinBedTemperatureRiseFactor : MinToolTemperatureRiseFactor))
 								{
 									++heatingFaultCount;
 									if (heatingFaultCount * HeatSampleIntervalMillis > GetMaxHeatingFaultTime() * SecondsToMillis)
@@ -357,7 +358,7 @@ void LocalHeater::Spin() noexcept
 				break;
 
 			case HeaterMode::cooling:
-				if (-error <= TEMPERATURE_CLOSE_ENOUGH && targetTemperature > MaxAmbientTemperature)
+				if (-error <= TemperatureCloseEnough && targetTemperature > MaxAmbientTemperature)
 				{
 					// We have cooled to close to the target temperature, so we should now maintain that temperature
 					mode = HeaterMode::stable;
@@ -444,6 +445,10 @@ void LocalHeater::Spin() noexcept
 				HeaterMonitor& prot = monitors[i];
 				if (!prot.Check())
 				{
+					if (reprap.Debug(moduleHeat))
+					{
+						reprap.GetPlatform().MessageF(GenericMessage, "Heater %u protection kicked in\n", GetHeaterNumber());
+					}
 					lastPwm = 0.0;
 					switch (prot.GetAction())
 					{
@@ -461,10 +466,7 @@ void LocalHeater::Spin() noexcept
 						break;
 
 					case HeaterMonitorAction::PermanentSwitchOff:
-						if (mode != HeaterMode::fault)
-						{
-							SwitchOff();
-						}
+						SwitchOff();
 						break;
 					}
 				}
@@ -477,7 +479,8 @@ void LocalHeater::Spin() noexcept
 
 		// Set the heater power and update the average PWM
 		SetHeater(lastPwm);
-		averagePWM = averagePWM * (1.0 - HeatSampleIntervalMillis/(HeatPwmAverageTime * SecondsToMillis)) + lastPwm;
+		constexpr float avgFactor = HeatSampleIntervalMillis/(HeatPwmAverageTime * SecondsToMillis);
+		averagePWM = (averagePWM * (1.0 - avgFactor)) + (lastPwm * avgFactor);
 
 		// For temperature sensors which do not require frequent sampling and averaging,
 		// their temperature is read here and error/safety handling performed.  However,
@@ -504,7 +507,7 @@ GCodeResult LocalHeater::ResetFault(const StringRef& reply) noexcept
 
 float LocalHeater::GetAveragePWM() const noexcept
 {
-	return averagePWM * HeatSampleIntervalMillis/(HeatPwmAverageTime * SecondsToMillis);
+	return averagePWM;
 }
 
 // Get a conservative estimate of the expected heating rate at the current temperature and average PWM. The result may be negative.
@@ -554,7 +557,7 @@ void LocalHeater::FeedForwardAdjustment(float fanPwmChange, float extrusionChang
 {
 	if (mode == HeaterMode::stable)
 	{
-		const float boost = GetModel().GetPwmCorrectionForFan(GetTargetTemperature() - NormalAmbientTemperature, fanPwmChange) * FeedForwardMultiplier;
+		const float boost = GetModel().GetPwmCorrectionForFan(GetTargetTemperature() - NormalAmbientTemperature, fanPwmChange) * FanFeedForwardMultiplier;
 #if 0
 		if (reprap.Debug(moduleHeat))
 		{
@@ -933,7 +936,7 @@ void LocalHeater::RaiseHeaterFault(HeaterFaultType type, const char *_ecv_array 
 		else
 #endif
 		{
-			Event::AddEventV(EventType::heater_fault, (uint16_t)type, GetHeaterNumber(), CanInterface::GetCanAddress(), format, vargs);
+			Event::AddEventV(EventType::heater_fault, (uint16_t)type, CanInterface::GetCanAddress(), GetHeaterNumber(), format, vargs);
 		}
 		va_end(vargs);
 	}

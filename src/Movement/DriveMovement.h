@@ -50,7 +50,9 @@ public:
 
 	bool CalcNextStepTime(const DDA &dda) noexcept SPEED_CRITICAL;
 	bool PrepareCartesianAxis(const DDA& dda, const PrepParams& params) noexcept SPEED_CRITICAL;
+#if SUPPORT_LINEAR_DELTA
 	bool PrepareDeltaAxis(const DDA& dda, const PrepParams& params) noexcept SPEED_CRITICAL;
+#endif
 	bool PrepareExtruder(const DDA& dda, const PrepParams& params) noexcept SPEED_CRITICAL;
 
 	void DebugPrint() const noexcept;
@@ -70,7 +72,9 @@ private:
 	bool CalcNextStepTimeFull(const DDA &dda) noexcept SPEED_CRITICAL;
 	bool NewCartesianSegment() noexcept SPEED_CRITICAL;
 	bool NewExtruderSegment() noexcept SPEED_CRITICAL;
+#if SUPPORT_LINEAR_DELTA
 	bool NewDeltaSegment(const DDA& dda) noexcept SPEED_CRITICAL;
+#endif
 
 	static DriveMovement *freeList;
 	static unsigned int numCreated;
@@ -85,14 +89,16 @@ private:
 	uint8_t direction : 1,								// true=forwards, false=backwards
 			directionChanged : 1,						// set by CalcNextStepTime if the direction is changed
 			isDelta : 1,								// true if this DM uses segment-free delta kinematics
-			isExtruder : 1;								// true if this DM is for an extruder (only matters if !isDelta)
+			isExtruder : 1,								// true if this DM is for an extruder (only matters if !isDelta)
+					: 2,								// padding to make the next field last
+			stepsTakenThisSegment : 2;					// how many steps we have taken this phase, counts from 0 to 2. Last field in the byte so that we can increment it efficiently.
 	uint8_t stepsTillRecalc;							// how soon we need to recalculate
 
 	uint32_t totalSteps;								// total number of steps for this move
 
 	// These values change as the step is executed, except for reverseStartStep
 	uint32_t nextStep;									// number of steps already done
-	uint32_t phaseStepLimit;							// the first step number of the next phase, or the reverse start step if smaller
+	uint32_t segmentStepLimit;							// the first step number of the next phase, or the reverse start step if smaller
 	uint32_t reverseStartStep;							// the step number for which we need to reverse direction due to pressure advance or delta movement
 	uint32_t nextStepTime;								// how many clocks after the start of this move the next step is due
 	uint32_t stepInterval;								// how many clocks between steps
@@ -159,11 +165,11 @@ inline bool DriveMovement::CalcNextStepTime(const DDA &dda) noexcept
 	{
 		if (stepsTillRecalc != 0)
 		{
-			--stepsTillRecalc;			// we are doing double/quad/octal stepping
+			--stepsTillRecalc;				// we are doing double/quad/octal stepping
 #if EVEN_STEPS
 			nextStepTime += stepInterval;
 #endif
-#if SAME70
+#ifdef DUET3_MB6HC							// we need to increase the minimum step pulse length to be long enough for the TMC5160
 			asm volatile("nop");
 			asm volatile("nop");
 			asm volatile("nop");
@@ -177,7 +183,7 @@ inline bool DriveMovement::CalcNextStepTime(const DDA &dda) noexcept
 	}
 
 	state = DMState::idle;
-#if SAME70
+#ifdef DUET3_MB6HC							// we need to increase the minimum step pulse length to be long enough for the TMC5160
 			asm volatile("nop");
 			asm volatile("nop");
 			asm volatile("nop");
@@ -237,9 +243,9 @@ inline void DriveMovement::Release(DriveMovement *item) noexcept
 // Get the current full step interval for this axis or extruder
 inline uint32_t DriveMovement::GetStepInterval(uint32_t microstepShift) const noexcept
 {
-	return (nextStep < totalSteps && nextStep > (1u << microstepShift))		// if at least 1 full step done
-		? stepInterval << microstepShift									// return the interval between steps converted to full steps
-			: 0;
+	return (nextStep < totalSteps && nextStep > (1u << microstepShift))				// if at least 1 full step done
+				? stepInterval << microstepShift									// return the interval between steps converted to full steps
+					: 0;
 }
 
 #endif

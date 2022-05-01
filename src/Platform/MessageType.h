@@ -48,25 +48,26 @@ enum MessageType : uint32_t
 	LogLevelShift = 30,						// How many bits we have to shift a MessageType right by to get the logging level
 
 	// Common combinations
-	NoDestinationMessage = 0u,												// A message that is going nowhere
-	GenericMessage = UsbMessage | AuxMessage | HttpMessage | TelnetMessage,	// A message that is to be sent to the web, Telnet, USB and panel
-	LogOff = LogMessageLowBit | LogMessageHighBit,							// Log level "off (3): do not log this message
-	LogWarn = LogMessageHighBit,											// Log level "warn" (2): all messages of type Error and Warning are logged
-	LogInfo = LogMessageLowBit,												// Log level "info" (1): all messages of level "warn" plus info messages
-	LoggedGenericMessage = GenericMessage | LogWarn,						// A GenericMessage that is also logged
-	DirectAuxMessage = AuxMessage | RawMessageFlag,							// Direct message to PanelDue
-	ErrorMessage = GenericMessage | LogWarn | ErrorMessageFlag,				// An error message
-	WarningMessage = GenericMessage | LogWarn | WarningMessageFlag,			// A warning message
-	FirmwareUpdateMessage = UsbMessage | ImmediateAuxMessage,				// A message that conveys progress of a firmware update
-	FirmwareUpdateErrorMessage = FirmwareUpdateMessage | ErrorMessageFlag,	// A message that reports an error during a firmware update
-	NetworkInfoMessage = UsbMessage | AuxMessage | LogWarn				 	// A message that conveys information about the state of the network interface
+	NoDestinationMessage = 0u,													// A message that is going nowhere
+	GenericMessage = UsbMessage | AuxMessage | HttpMessage | TelnetMessage,		// A message that is to be sent to the web, Telnet, USB and panel
+	LogOff = LogMessageLowBit | LogMessageHighBit,								// Log level "off (3): do not log this message
+	LogWarn = LogMessageHighBit,												// Log level "warn" (2): all messages of type Error and Warning are logged
+	LogInfo = LogMessageLowBit,													// Log level "info" (1): all messages of level "warn" plus info messages
+	LoggedGenericMessage = GenericMessage | LogWarn,							// A GenericMessage that is also logged
+	DirectAuxMessage = AuxMessage | RawMessageFlag,								// Direct message to PanelDue
+	ErrorMessage = GenericMessage | LogWarn | ErrorMessageFlag,					// An error message
+	WarningMessage = GenericMessage | LogWarn | WarningMessageFlag,				// A warning message
+	FirmwareUpdateMessage = UsbMessage | ImmediateAuxMessage,					// A message that conveys progress of a firmware update
+	FirmwareUpdateErrorMessage = FirmwareUpdateMessage | ErrorMessageFlag,		// A message that reports an error during a firmware update
+	NetworkInfoMessage = UsbMessage | AuxMessage | LogWarn,				 		// A message that conveys information about the state of the network interface
+	NetworkErrorMessage = UsbMessage | AuxMessage | LogWarn | ErrorMessageFlag	// A message that conveys information about the state of the network interface
 };
 
 inline constexpr MessageType AddLogDebug(MessageType mt) noexcept
 {
 	// Debug level has no flags set such that any non-flagged message automatically
 	// is part of this log level - force it by removing the existing flags
-	return (MessageType)(mt & ~(LogMessageLowBit | LogMessageHighBit));
+	return (MessageType)((uint32_t)mt & ~((uint32_t)LogMessageLowBit | (uint32_t)LogMessageHighBit));
 }
 
 inline constexpr MessageType AddLogWarn(MessageType mt) noexcept
@@ -74,7 +75,7 @@ inline constexpr MessageType AddLogWarn(MessageType mt) noexcept
 	// Since increasing log levels have lower numbers we need to delete
 	// any existing log flags first - otherwise this could lead to MessageLogLevel
 	// rising to 3 which is equivalent to OFF
-	return (MessageType)(AddLogDebug(mt) | LogWarn);
+	return (MessageType)((uint32_t)AddLogDebug(mt) | (uint32_t)LogWarn);
 }
 
 inline constexpr MessageType AddLogInfo(MessageType mt) noexcept
@@ -82,22 +83,22 @@ inline constexpr MessageType AddLogInfo(MessageType mt) noexcept
 	// Since increasing log levels have lower numbers we need to delete
 	// any existing log flags first - otherwise this could lead to MessageLogLevel
 	// rising to 3 which is equivalent to OFF
-	return (MessageType)(AddLogDebug(mt) | LogInfo);
+	return (MessageType)((uint32_t)AddLogDebug(mt) | (uint32_t)LogInfo);
 }
 
 inline constexpr MessageType RemoveLogging(MessageType mt) noexcept
 {
-	return (MessageType)(mt | LogOff);
+	return (MessageType)((uint32_t)mt | (uint32_t)LogOff);
 }
 
 inline constexpr MessageType AddError(MessageType mt) noexcept
 {
-	return AddLogWarn((MessageType)(mt | ErrorMessageFlag));
+	return AddLogWarn((MessageType)((uint32_t)mt | (uint32_t)ErrorMessageFlag));
 }
 
 inline constexpr MessageType AddWarning(MessageType mt) noexcept
 {
-	return AddLogWarn((MessageType)(mt | WarningMessageFlag));
+	return AddLogWarn((MessageType)((uint32_t)mt | (uint32_t)WarningMessageFlag));
 }
 
 #endif /* MESSAGETYPE_H_ */

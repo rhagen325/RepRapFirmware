@@ -184,7 +184,16 @@ AxesBitmap Kinematics::GetHomingFileName(AxesBitmap toBeHomed, AxesBitmap alread
 		if (toBeHomed.IsBitSet(axis) && (axis != Z_AXIS || !homeZLast || (alreadyHomed & homeFirst) == homeFirst))
 		{
 			filename.copy("home");
-			filename.cat(tolower(reprap.GetGCodes().GetAxisLetters()[axis]));
+			const char axisLetter = reprap.GetGCodes().GetAxisLetters()[axis];
+			if (islower(axisLetter))
+			{
+				filename.cat('\'');
+				filename.cat(axisLetter);
+			}
+			else
+			{
+				filename.cat(tolower(axisLetter));
+			}
 			filename.cat(".g");
 			return AxesBitmap();
 		}
@@ -238,18 +247,35 @@ void Kinematics::LimitSpeedAndAcceleration(DDA& dda, const float *normalisedDire
 	case KinematicsType::markForged:
 		return new CoreKinematics(k);
 
+#if SUPPORT_LINEAR_DELTA
 	case KinematicsType::linearDelta:
 		return new LinearDeltaKinematics();
+#endif
+
+#if SUPPORT_SCARA
 	case KinematicsType::scara:
 		return new ScaraKinematics();
+#endif
+
+#if SUPPORT_HANGPRINTER
 	case KinematicsType::hangprinter:
 		return new HangprinterKinematics();
+#endif
+
+#if SUPPORT_POLAR
 	case KinematicsType::polar:
 		return new PolarKinematics();
+#endif
+
+#if SUPPORT_ROTARY_DELTA
 	case KinematicsType::rotaryDelta:
 		return new RotaryDeltaKinematics();
+#endif
+
+#if SUPPORT_FIVEBARSCARA
 	case KinematicsType::fiveBarScara:
 		return new FiveBarScaraKinematics();
+#endif
 	}
 }
 

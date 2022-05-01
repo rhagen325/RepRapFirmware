@@ -111,7 +111,6 @@ constexpr size_t MaxMonitorsPerHeater = 3;			// The maximum number of monitors p
 
 constexpr size_t MaxBedHeaters = 4;
 constexpr size_t MaxChamberHeaters = 4;
-constexpr int8_t DefaultBedHeater = 0;
 constexpr int8_t DefaultE0Heater = 1;				// Index of the default first extruder heater, used only for the legacy status response
 
 constexpr size_t NumThermistorInputs = 8;
@@ -123,7 +122,7 @@ constexpr size_t MaxGpOutPorts = 20;
 
 constexpr size_t MinAxes = 3;						// The minimum and default number of axes
 constexpr size_t MaxAxes = 10;						// The maximum number of movement axes in the machine, usually just X, Y and Z
-constexpr size_t MaxDriversPerAxis = 5;				// The maximum number of stepper drivers assigned to one axis
+constexpr size_t MaxDriversPerAxis = 6;				// The maximum number of stepper drivers assigned to one axis (increased to 6 for Modix)
 
 constexpr size_t MaxExtruders = 7;					// The maximum number of extruders
 constexpr size_t MaxAxesPlusExtruders = 12;
@@ -197,6 +196,7 @@ constexpr Pin TEMP_SENSE_PINS[NumThermistorInputs] =
 
 // Thermistor series resistor value in Ohms
 constexpr float DefaultThermistorSeriesR = 4700.0;
+constexpr float DefaultThermistorSeriesR_DueX_v0_11 = 2200.0;
 
 // Digital pins the 31855s have their select lines tied to
 constexpr Pin SpiTempSensorCsPins[] =
@@ -463,7 +463,7 @@ constexpr GpioPinFunction USARTSPISckPeriphMode = GpioPinFunction::C;
 // SD Card
 constexpr Pin HsmciClockPin = PortAPin(29);
 constexpr Pin HsmciOtherPins[] = { PortAPin(28), PortAPin(30), PortAPin(31), PortAPin(26), PortAPin(27) };
-constexpr auto HsmciPinsFunction = GpioPinFunction::C;
+constexpr GpioPinFunction HsmciPinsFunction = GpioPinFunction::C;
 
 /*
  * TWI Interfaces

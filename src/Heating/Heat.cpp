@@ -261,8 +261,8 @@ void Heat::ResetHeaterModels() noexcept
 
 void Heat::Init() noexcept
 {
-	extrusionMinTemp = HOT_ENOUGH_TO_EXTRUDE;
-	retractionMinTemp = HOT_ENOUGH_TO_RETRACT;
+	extrusionMinTemp = DefaultMinExtrusionTemperature;
+	retractionMinTemp = DefaultMinRetractionTemperature;
 	coldExtrude = false;
 
 	heaterTask.Create(HeaterTaskStart, "HEAT", nullptr, TaskPriority::HeatPriority);
@@ -575,7 +575,7 @@ GCodeResult Heat::ConfigureHeater(GCodeBuffer& gb, const StringRef& reply) THROW
 		Heater * const newHeater = new LocalHeater(heater);
 #endif
 		const GCodeResult rslt = newHeater->ConfigurePortAndSensor(pinName.c_str(), freq, sensorNumber, reply);
-		if (rslt == GCodeResult::ok || rslt == GCodeResult::warning)
+		if (Succeeded(rslt))
 		{
 			heaters[heater] = newHeater;
 		}
@@ -633,7 +633,9 @@ bool Heat::HeaterAtSetTemperature(int heater, bool waitWhenCooling, float tolera
 		{
 			const float dt = h->GetTemperature();
 			const float target = (stat == HeaterStatus::active) ? h->GetActiveTemperature() : h->GetStandbyTemperature();
-			return (target < TEMPERATURE_LOW_SO_DONT_CARE)
+			const bool cooling = h->IsCoolingDevice();
+			return (!cooling && target < TemperatureSoLowDontCare)
+				|| (cooling && target > TemperatureSoHighDontCare)
 				|| (fabsf(dt - target) <= tolerance)
 				|| (target < dt && !waitWhenCooling);
 
@@ -776,14 +778,19 @@ float Heat::GetTargetTemperature(int heater) const noexcept
 				: 0.0;
 }
 
-GCodeResult Heat::Activate(int heater, const StringRef& reply) noexcept
+GCodeResult Heat::SetActiveOrStandby(int heater, const Tool *tool, bool active, const StringRef& reply) noexcept
 {
 	const auto h = FindHeater(heater);
 	if (h.IsNotNull())
 	{
-		return h->Activate(reply);
+		const GCodeResult rslt = h->SetActiveOrStandby(active, reply);
+		if (rslt == GCodeResult::ok && !active)
+		{
+			lastStandbyTools[heater] = tool;
+		}
+		return rslt;
 	}
-	reply.copy("Heater %d not found", heater);
+	reply.printf("Heater %d not found", heater);
 	return GCodeResult::error;
 }
 
@@ -824,16 +831,6 @@ void Heat::SwitchOffAllLocalFromISR() noexcept
 		{
 			h->SwitchOff();
 		}
-	}
-}
-
-void Heat::Standby(int heater, const Tool *tool) noexcept
-{
-	const auto h = FindHeater(heater);
-	if (h.IsNotNull())
-	{
-		h->Standby();
-		lastStandbyTools[heater] = tool;
 	}
 }
 
@@ -1003,7 +1000,7 @@ GCodeResult Heat::TuneHeater(GCodeBuffer& gb, const StringRef& reply) THROWS(GCo
 		}
 
 		const GCodeResult rslt = h->StartAutoTune(gb, reply, fans);
-		if (rslt <= GCodeResult::warning)
+		if (Succeeded(rslt))
 		{
 			heaterBeingTuned = (int8_t)heaterNumber;
 		}
@@ -1090,7 +1087,7 @@ GCodeResult Heat::ConfigureSensor(GCodeBuffer& gb, const StringRef& reply) THROW
 		try
 		{
 			const GCodeResult rslt = newSensor->Configure(gb, reply, changed);
-			if (rslt == GCodeResult::ok)
+			if (Succeeded(rslt))
 			{
 				InsertSensor(newSensor);
 			}

@@ -121,7 +121,9 @@ public:
 	bool IsAccessibleProbePoint(float axesCoords[MaxAxes], AxesBitmap axes) const noexcept;
 
 	// Temporary kinematics functions
+#if SUPPORT_LINEAR_DELTA
 	bool IsDeltaMode() const noexcept { return kinematics->GetKinematicsType() == KinematicsType::linearDelta; }
+#endif
 	// End temporary functions
 
 	bool IsRawMotorMove(uint8_t moveType) const noexcept;									// Return true if this is a raw motor move
@@ -154,10 +156,10 @@ public:
 	const RandomProbePointSet& GetProbePoints() const noexcept { return probePoints; }		// Return the probe point set constructed from G30 commands
 
 	DDARing& GetMainDDARing() noexcept { return mainDDARing; }
-	float GetTopSpeed() const noexcept { return mainDDARing.GetTopSpeed(); }
-	float GetRequestedSpeed() const noexcept { return mainDDARing.GetRequestedSpeed(); }
-	float GetAcceleration() const noexcept { return mainDDARing.GetAcceleration(); }
-	float GetDeceleration() const noexcept { return mainDDARing.GetDeceleration(); }
+	float GetTopSpeedMmPerSec() const noexcept { return mainDDARing.GetTopSpeedMmPerSec(); }
+	float GetRequestedSpeedMmPerSec() const noexcept { return mainDDARing.GetRequestedSpeedMmPerSec(); }
+	float GetAccelerationMmPerSecSquared() const noexcept { return mainDDARing.GetAccelerationMmPerSecSquared(); }
+	float GetDecelerationMmPerSecSquared() const noexcept { return mainDDARing.GetDecelerationMmPerSecSquared(); }
 
 	void AdjustLeadscrews(const floatc_t corrections[]) noexcept;							// Called by some Kinematics classes to adjust the leadscrews
 
@@ -203,11 +205,13 @@ public:
 	void AddShapeddMoveFromRemote(const CanMessageMovementLinearShaped& msg) noexcept		// add a move from the ATE to the movement queue
 	{
 		mainDDARing.AddMoveFromRemote(msg);
+		MoveAvailable();
 	}
 # else
 	void AddMoveFromRemote(const CanMessageMovementLinear& msg) noexcept					// add a move from the ATE to the movement queue
 	{
 		mainDDARing.AddMoveFromRemote(msg);
+		MoveAvailable();
 	}
 # endif
 #endif

@@ -23,7 +23,7 @@ GCodeQueue::GCodeQueue() noexcept : freeItems(nullptr), queuedItems(nullptr)
 	}
 }
 
-// Return true if the move in the GCodeBuffer should be queued
+// Return true if the move in the GCodeBuffer should be queued. Caller has already checked that the command does not contain an expression.
 /*static*/ bool GCodeQueue::ShouldQueueCode(GCodeBuffer &gb) THROWS(GCodeException)
 {
 #if SUPPORT_ROLAND
@@ -38,13 +38,15 @@ GCodeQueue::GCodeQueue() noexcept : freeItems(nullptr), queuedItems(nullptr)
 	const uint32_t scheduledMoves = reprap.GetMove().GetScheduledMoves();
 	if (scheduledMoves != reprap.GetMove().GetCompletedMoves())
 	{
+		bool shouldQueue;
 		switch (gb.GetCommandLetter())
 		{
 		case 'G':
-			return gb.GetCommandNumber() == 10
-				&& gb.Seen('P')
-				&& !gb.Seen('L')
-				&& (gb.Seen('R') || gb.Seen('S'));	// Set active/standby temperatures
+			shouldQueue = gb.GetCommandNumber() == 10
+						&& gb.Seen('P')
+						&& !gb.Seen('L')
+						&& (gb.Seen('R') || gb.Seen('S'));						// set active/standby temperatures
+			break;
 
 		case 'M':
 			{
@@ -53,7 +55,8 @@ GCodeQueue::GCodeQueue() noexcept : freeItems(nullptr), queuedItems(nullptr)
 				case 3:		// spindle or laser control
 				case 5:		// spindle or laser control
 					// On laser devices we use these codes to set the default laser power for the next G1 command
-					return reprap.GetGCodes().GetMachineType() != MachineType::laser;
+					shouldQueue = reprap.GetGCodes().GetMachineType() != MachineType::laser;
+					break;
 
 				case 4:		// spindle control
 				case 42:	// set IO pin
@@ -66,7 +69,8 @@ GCodeQueue::GCodeQueue() noexcept : freeItems(nullptr), queuedItems(nullptr)
 				case 280:	// set servo
 				case 300:	// beep
 				case 568:	// spindle or temperature control
-					return true;
+					shouldQueue = true;
+					break;
 
 				case 117:	// display message
 					{
@@ -75,29 +79,36 @@ GCodeQueue::GCodeQueue() noexcept : freeItems(nullptr), queuedItems(nullptr)
 						String<M117StringLength> dummy;
 						gb.GetUnprecedentedString(dummy.GetRef());
 					}
-					return true;
+					shouldQueue = true;
+					break;
 
 #if SUPPORT_LED_STRIPS
 				case 150:	// set LED colours
-					return !LedStripDriver::MustStopMovement(gb);		// if it is going to call LockMovementAndWaitForStandstill then we mustn't queue it
+					shouldQueue = !LedStripDriver::MustStopMovement(gb);		// if it is going to call LockMovementAndWaitForStandstill then we mustn't queue it
+					break;
 #endif
-
+				// A note about M291:
+				// - We cannot queue M291 messages that are blocking, i.e. with S2 or S3 parameter
+				// - If we queue non-blocking M291 messages then it can happen that if a non-blocking M291 is used and a little later a blocking M291 is used,
+				//   then the blocking one gets displayed while the non-blocking one is still in the queue. Then the non-blocking one overwrites it, and the
+				//   blocking one can no longer be acknowledged except by sending M292 manually.
+				// - Therefore we no longer queue any M291 commands.
 				case 291:
-					{
-						bool seen = false;
-						int32_t sParam = 1;
-						gb.TryGetIValue('S', sParam, seen);
-						return sParam < 2;					// queue non-blocking messages only
-					}
-
 				default:
+					shouldQueue = false;
 					break;
 				}
 			}
 			break;
 
 		default:
+			shouldQueue = false;
 			break;
+		}
+
+		if (shouldQueue)
+		{
+			return gb.DataLength() <= BufferSizePerQueueItem;					// only queue it if it is short enough to fit in a queue item
 		}
 	}
 
@@ -106,13 +117,11 @@ GCodeQueue::GCodeQueue() noexcept : freeItems(nullptr), queuedItems(nullptr)
 
 // Try to queue the command in the passed GCodeBuffer.
 // If successful, return true to indicate it has been queued.
-// If the queue is full or the command is too long to be queued, return false.
+// If the queue is full, return false. Caller will wait for space to become available.
 bool GCodeQueue::QueueCode(GCodeBuffer &gb, uint32_t scheduleAt) noexcept
 {
 	// Can we queue this code somewhere?
-	if (freeItems == nullptr || gb.DataLength() > BufferSizePerQueueItem
-		|| gb.ContainsExpression()						// if it contains an expression then the expression value may change or refer to 'iterations'
-	   )
+	if (freeItems == nullptr)
 	{
 		return false;
 	}
@@ -253,8 +262,8 @@ void QueuedCode::AssignFrom(GCodeBuffer &gb) noexcept
 #if HAS_SBC_INTERFACE
 	isBinary = gb.IsBinary();
 #endif
-	memcpy(data, gb.DataStart(), gb.DataLength());
-	dataLength = gb.DataLength();
+	dataLength = min<size_t>(gb.DataLength(), sizeof(data));
+	memcpy(data, gb.DataStart(), dataLength);
 }
 
 void QueuedCode::AssignTo(GCodeBuffer *gb) noexcept

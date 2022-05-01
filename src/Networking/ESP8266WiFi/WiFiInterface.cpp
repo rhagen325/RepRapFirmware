@@ -7,6 +7,9 @@
 
 
 #include "WiFiInterface.h"
+
+#if HAS_WIFI_NETWORKING
+
 #include <Platform/Platform.h>
 #include <Platform/RepRap.h>
 #include <GCodes/GCodeBuffer/GCodeBuffer.h>
@@ -91,7 +94,7 @@ constexpr SSPChannel ESP_SPI = SSP0;
 #endif
 
 const uint32_t WiFiResponseTimeoutMillis = 200;					// SPI timeout when when the ESP does not have to write to flash memory
-const uint32_t WiFiTransferTimeoutMillis = 60;					// Christian measured this at 29 to 31ms when the ESP has to write to flag memory
+const uint32_t WiFiTransferTimeoutMillis = 60;					// Christian measured this at 29 to 31ms when the ESP has to write to flash memory
 const uint32_t WiFiWaitReadyMillis = 100;
 const uint32_t WiFiStartupMillis = 300;
 const uint32_t WiFiStableMillis = 100;
@@ -471,8 +474,9 @@ void WiFiInterface::Activate() noexcept
 
 		bufferOut = new MessageBufferOut;
 		bufferIn = new MessageBufferIn;
+#if HAS_MASS_STORAGE || HAS_EMBEDDED_FILES
 		uploader = new WifiFirmwareUploader(SERIAL_WIFI_DEVICE, *this);
-
+#endif
 		if (requestedMode != WiFiState::disabled)
 		{
 			Start();
@@ -643,9 +647,20 @@ void WiFiInterface::Spin() noexcept
 						rc = SendCommand(NetworkCommand::networkSetHostName, 0, 0, 0, reprap.GetNetwork().GetHostname(), HostNameLength, nullptr, 0);
 						if (rc != ResponseEmpty)
 						{
-							reprap.GetPlatform().MessageF(NetworkInfoMessage, "Error: Could not set WiFi hostname: %s\n", TranslateWiFiResponse(rc));
+							reprap.GetPlatform().MessageF(NetworkErrorMessage, "failed to set WiFi hostname: %s\n", TranslateWiFiResponse(rc));
 						}
-
+#if SAME5x
+						// If running the RTOS-based WiFi module code, tell the module to increase SPI clock speed to 40MHz.
+						// This is safe on SAME5x processors but not on SAM4 processors.
+						if (isdigit(wiFiServerVersion[0]) && wiFiServerVersion[0] >= '2')
+						{
+							rc = SendCommand(NetworkCommand::networkSetClockControl, 0, 0, 0x2001, nullptr, 0, nullptr, 0);
+							if (rc != ResponseEmpty)
+							{
+								reprap.GetPlatform().MessageF(NetworkErrorMessage, "failed to set WiFi SPI speed: %s\n", TranslateWiFiResponse(rc));
+							}
+						}
+#endif
 						SetState(NetworkState::active);
 						espStatusChanged = true;				// make sure we fetch the current state and enable the ESP interrupt
 					}
@@ -653,7 +668,7 @@ void WiFiInterface::Spin() noexcept
 					{
 						// Something went wrong, maybe a bad firmware image was flashed
 						// Disable the WiFi chip again in this case
-						platform.MessageF(NetworkInfoMessage, "Error: Failed to initialise WiFi module: %s\n", TranslateWiFiResponse(rc));
+						platform.MessageF(NetworkErrorMessage, "failed to initialise WiFi module: %s\n", TranslateWiFiResponse(rc));
 						Stop();
 					}
 				}
@@ -666,10 +681,12 @@ void WiFiInterface::Spin() noexcept
 		break;
 
 	case NetworkState::disabled:
+#if HAS_MASS_STORAGE || HAS_EMBEDDED_FILES
 		if (uploader != nullptr)
 		{
 			uploader->Spin();
 		}
+#endif
 		break;
 
 	case NetworkState::active:
@@ -710,7 +727,7 @@ void WiFiInterface::Spin() noexcept
 			else
 			{
 				Stop();
-				platform.MessageF(NetworkInfoMessage, "Failed to change WiFi mode: %s\n", TranslateWiFiResponse(rslt));
+				platform.MessageF(NetworkErrorMessage, "failed to change WiFi mode: %s\n", TranslateWiFiResponse(rslt));
 			}
 		}
 		else if (currentMode == WiFiState::connected || currentMode == WiFiState::runningAsAccessPoint)
@@ -838,7 +855,7 @@ void WiFiInterface::Spin() noexcept
 	}
 }
 
-// Translate a ESP8266 reset reason to text
+// Translate a ESP8266 reset reason to text. Keep this in step with the codes used in file MessageFormats.h in the WiFi server project.
 const char* WiFiInterface::TranslateEspResetReason(uint32_t reason) noexcept
 {
 	// Mapping from known ESP reset codes to reasons
@@ -850,12 +867,15 @@ const char* WiFiInterface::TranslateEspResetReason(uint32_t reason) noexcept
 		"Software watchdog",
 		"Software restart",
 		"Deep-sleep wakeup",
-		"Turned on by main processor"
+		"Turned on by main processor",
+		"Brownout",
+		"SDIO reset",
+		"Unknown"
 	};
 
 	return (reason < sizeof(resetReasonTexts)/sizeof(resetReasonTexts[0]))
 			? resetReasonTexts[reason]
-			: "Unknown";
+			: "Unrecognised";
 }
 
 void WiFiInterface::Diagnostics(MessageType mtype) noexcept
@@ -1824,21 +1844,25 @@ int32_t WiFiInterface::SendCommand(NetworkCommand cmd, SocketNumber socketNum, u
 
 #if SAME5x
 	{
-		// We don't get and end-of-transfer interrupt, just a start-of-transfer one. So wait until SS is high, then disable the SPI.
-		// The max block time is about 2K * 8/spi_clock_speed plus any pauses that the ESP takes, which at 26.7MHz clock rate is 620us plus pause time
-		// However, when we send a command that involves writing to flash memory, then the flash write occurs between sending the header and the body
+		// We don't get an end-of-transfer interrupt, just a start-of-transfer one. So wait until SS is high, then disable the SPI.
+		// The normal maximum block time is about 2K * 8/spi_clock_speed plus any pauses that the ESP takes, which at 26.7MHz clock rate is 620us plus pause time
+		// However, when we send a command that involves writing to flash memory, then the flash write occurs between sending the header and the body, so it takes much longer
 		const uint32_t startedWaitingAt = millis();
 		const bool writingFlash = (   cmd == NetworkCommand::networkAddSsid || cmd == NetworkCommand::networkConfigureAccessPoint
 								   || cmd == NetworkCommand::networkDeleteSsid || cmd == NetworkCommand::networkFactoryReset);
 		while (!digitalRead(EspSSPin))
 		{
-			if (writingFlash)
-			{
-				delay(2);						// we sent a command that writes to flash memory. It may take a while and we're not trying to minimise latency, so give up the CPU
-			}
-			if (millis() - startedWaitingAt >= WiFiTransferTimeoutMillis)
+			const uint32_t millisWaiting = millis() - startedWaitingAt;
+			if (millisWaiting >= WiFiTransferTimeoutMillis)
 			{
 				return ResponseTimeout;
+			}
+
+			// The new RTOS SDK for the ESP8266 often interrupts out transfer task for long periods of time. So if the transfer is taking a while to complete, give up the CPU.
+			// Also give up the CPU if we are writing to flash memory, because we know that takes a long time.
+			if (writingFlash || millisWaiting >= 2)
+			{
+				delay(2);
 			}
 		}
 		if (WiFiSpiSercom->SPI.STATUS.bit.BUFOVF)
@@ -1919,11 +1943,11 @@ void WiFiInterface::GetNewStatus() noexcept
 	rcvr.Value().messageBuffer[ARRAY_UPB(rcvr.Value().messageBuffer)] = 0;
 	if (rslt < 0)
 	{
-		platform.MessageF(NetworkInfoMessage, "Error retrieving WiFi status message: %s\n", TranslateWiFiResponse(rslt));
+		platform.MessageF(NetworkErrorMessage, "failed to retrieve WiFi status message: %s\n", TranslateWiFiResponse(rslt));
 	}
 	else if (rslt > 0 && rcvr.Value().messageBuffer[0] != 0)
 	{
-		platform.MessageF(NetworkInfoMessage, "WiFi reported error: %s\n", rcvr.Value().messageBuffer);
+		platform.MessageF(NetworkErrorMessage, "WiFi module reported: %s\n", rcvr.Value().messageBuffer);
 	}
 }
 
@@ -2113,5 +2137,7 @@ void WiFiInterface::ResetWiFiForUpload(bool external) noexcept
 	digitalWrite(EspEnablePin, true);
 #endif
 }
+
+#endif	// HAS_WIFI_NETWORKING
 
 // End

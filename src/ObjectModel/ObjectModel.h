@@ -56,7 +56,7 @@ class CanExpansionBoardDetails;
 
 enum class ExpansionDetail : uint32_t
 {
-	shortName, firmwareVersion, firmwareFileName, firmwareDate
+	shortName, firmwareVersion, firmwareFileName, firmwareDate, longName
 };
 
 #endif
@@ -71,7 +71,7 @@ class UniqueId;
 // Encapsulated time_t, used to facilitate overloading the ExpressionValue constructor
 struct DateTime
 {
-	explicit DateTime(time_t t) : tim(t) { }
+	explicit DateTime(time_t t) noexcept : tim(t) { }
 
 	time_t tim;
 };
@@ -120,7 +120,7 @@ struct ExpressionValue
 	explicit constexpr ExpressionValue(const char *_ecv_array s) noexcept : type((uint32_t)TypeCode::CString), param(0), sVal(s) { }
 	explicit constexpr ExpressionValue(const ObjectModelArrayDescriptor *omad) noexcept : type((uint32_t)TypeCode::Array), param(0), omadVal(omad) { }
 	explicit constexpr ExpressionValue(IPAddress ip) noexcept : type((uint32_t)TypeCode::IPAddress_tc), param(0), uVal(ip.GetV4LittleEndian()) { }
-	explicit constexpr ExpressionValue(nullptr_t dummy) noexcept : type((uint32_t)TypeCode::None), param(0), uVal(0) { }
+	explicit constexpr ExpressionValue(std::nullptr_t dummy) noexcept : type((uint32_t)TypeCode::None), param(0), uVal(0) { }
 	explicit ExpressionValue(DateTime t) noexcept : type((t.tim == 0) ? (uint32_t)TypeCode::None : (uint32_t)TypeCode::DateTime_tc) { Set56BitValue(t.tim); }
 
 	explicit ExpressionValue(DriverId id) noexcept
@@ -175,7 +175,7 @@ struct ExpressionValue
 	}
 
 	void Set(StringHandle sh) noexcept { Release(); type = (uint32_t)TypeCode::HeapString; shVal = sh; }
-	void Set(nullptr_t dummy) noexcept { Release();  type = (uint32_t)TypeCode::None; }
+	void Set(std::nullptr_t dummy) noexcept { Release();  type = (uint32_t)TypeCode::None; }
 
 	// Store a 56-bit value
 	void Set56BitValue(uint64_t v) { Release(); param = (uint32_t)(v >> 32) & 0x00FFFFFFu; uVal = (uint32_t)v; }
@@ -192,7 +192,7 @@ struct ExpressionValue
 #endif
 
 	// Get the format string to use assuming this is a floating point number
-	const char *_ecv_array GetFloatFormatString() const noexcept;
+	const char *_ecv_array GetFloatFormatString() const noexcept { return ::GetFloatFormatString(fVal, param); }
 
 	// Append a string representation of this value to a string
 	void AppendAsString(const StringRef& str) const noexcept;
@@ -219,11 +219,12 @@ class ObjectExplorationContext
 {
 public:
 	// Constructor used when reporting the OM as JSON
-	ObjectExplorationContext(bool wal, const char *reportFlags, unsigned int initialMaxDepth, size_t initialBufferOffset) noexcept;
+	ObjectExplorationContext(const GCodeBuffer *_ecv_null gbp, bool wal, const char *reportFlags, unsigned int initialMaxDepth, size_t initialBufferOffset) noexcept;
 
 	// Constructor used when evaluating expressions
-	ObjectExplorationContext(bool wal, bool wex, int p_line, int p_col) noexcept;
+	ObjectExplorationContext(const GCodeBuffer *_ecv_null gbp, bool wal, bool wex, int p_line, int p_col) noexcept;
 
+	const GCodeBuffer *_ecv_null GetGCodeBuffer() const noexcept { return gb; }
 	void SetMaxDepth(unsigned int d) noexcept { maxDepth = d; }
 	bool IncreaseDepth() noexcept { if (currentDepth < maxDepth) { ++currentDepth; return true; } return false; }
 	void DecreaseDepth() noexcept { --currentDepth; }
@@ -267,6 +268,7 @@ private:
 	int32_t indices[MaxIndices];
 	int line;
 	int column;
+	const GCodeBuffer *_ecv_null gb;
 	unsigned int shortForm : 1,
 				wantArrayLength : 1,
 				wantExists : 1,
@@ -297,7 +299,7 @@ public:
 	virtual ~ObjectModel() { }
 
 	// Construct a JSON representation of those parts of the object model requested by the user. This version is called only on the root of the tree.
-	void ReportAsJson(OutputBuffer *buf, const char *_ecv_array filter, const char *_ecv_array reportFlags, bool wantArrayLength) const THROWS(GCodeException);
+	void ReportAsJson(const GCodeBuffer *_ecv_null gb, OutputBuffer *buf, const char *_ecv_array filter, const char *_ecv_array reportFlags, bool wantArrayLength) const THROWS(GCodeException);
 
 	// Get the value of an object via the table
 	ExpressionValue GetObjectValueUsingTableNumber(ObjectExplorationContext& context, const ObjectModelClassDescriptor * null classDescriptor, const char *_ecv_array idString, uint8_t tableNumber) const THROWS(GCodeException);

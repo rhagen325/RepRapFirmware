@@ -154,7 +154,13 @@ public:
 
 	PauseState GetPauseState() const noexcept { return pauseState; }
 	bool IsFlashing() const noexcept { return isFlashing; }						// Is a new firmware binary going to be flashed?
-	bool IsFlashingPanelDue() const noexcept { return isFlashingPanelDue; }
+
+	bool IsFlashingPanelDue() const noexcept
+#if SUPPORT_PANELDUE_FLASH
+		{ return isFlashingPanelDue; }
+#else
+		{ return false; }
+#endif
 
 	bool IsReallyPrinting() const noexcept;										// Return true if we are printing from SD card and not pausing, paused or resuming
 	bool IsReallyPrintingOrResuming() const noexcept;
@@ -168,6 +174,8 @@ public:
 	float GetSimulationTime() const noexcept { return simulationTime; }
 
 	bool AllAxesAreHomed() const noexcept;										// Return true if all axes are homed
+	bool LimitAxes() const noexcept { return limitAxes; }
+	bool NoMovesBeforeHoming() const noexcept { return noMovesBeforeHoming; }
 
 	void MoveStoppedByZProbe() noexcept { zProbeTriggered = true; }				// Called from the step ISR when the Z probe is triggered, causing the move to be aborted
 
@@ -182,11 +190,6 @@ public:
 #if HAS_VOLTAGE_MONITOR
 	bool LowVoltagePause() noexcept;
 	bool LowVoltageResume() noexcept;
-#endif
-
-#if HAS_SMART_DRIVERS
-	bool PauseOnStall(DriversBitmap stalledDrivers) noexcept;
-	bool ReHomeOnStall(DriversBitmap stalledDrivers) noexcept;
 #endif
 
 	const char *GetAxisLetters() const noexcept { return axisLetters; }			// Return a null-terminated string of axis letters indexed by drive
@@ -308,14 +311,9 @@ public:
 	static constexpr const char* FILAMENT_CHANGE_G = "filament-change.g";
 	static constexpr const char* DAEMON_G = "daemon.g";
 	static constexpr const char* RUNONCE_G = "runonce.g";
-#if HAS_SMART_DRIVERS
-	static constexpr const char* REHOME_G = "rehome.g";
-#endif
 
 private:
 	GCodes(const GCodes&) = delete;
-
-	enum class HeaterFaultState : uint8_t { noFault, pausePending, timing, stopping, stopped };
 
 	// Resources that can be locked.
 	// To avoid deadlock, if you need multiple resources then you must lock them in increasing numerical order.
@@ -672,7 +670,9 @@ private:
 	// Firmware update
 	Bitmap<uint8_t> firmwareUpdateModuleMap;	// Bitmap of firmware modules to be updated
 	bool isFlashing;							// Is a new firmware binary going to be flashed?
+#if SUPPORT_PANELDUE_FLASH
 	bool isFlashingPanelDue;					// Are we in the process of flashing PanelDue?
+#endif
 
 	// Code queue
 	GCodeQueue *codeQueue;						// Stores certain codes for deferred execution

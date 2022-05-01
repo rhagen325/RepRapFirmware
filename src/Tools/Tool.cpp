@@ -421,31 +421,12 @@ bool Tool::AllHeatersAtHighTemperature(bool forExtrusion) const noexcept
 	return true;
 }
 
-// Activate this tool
+// Activate this tool. Must set the current tool to be this tool first, otherwise the heater temperature may not get set.
 void Tool::Activate() noexcept
 {
-	for (size_t heater = 0; heater < heaterCount; heater++)
-	{
-		String<StringLength100> message;
-		GCodeResult ret;
-		try
-		{
-			reprap.GetHeat().SetActiveTemperature(heaters[heater], activeTemperatures[heater]);
-			reprap.GetHeat().SetStandbyTemperature(heaters[heater], standbyTemperatures[heater]);
-			ret = reprap.GetHeat().Activate(heaters[heater], message.GetRef());
-		}
-		catch (const GCodeException& exc)
-		{
-			exc.GetMessage(message.GetRef(), nullptr);
-			ret = GCodeResult::error;
-		}
-		if (ret != GCodeResult::ok)
-		{
-			reprap.GetPlatform().MessageF((ret == GCodeResult::warning) ? WarningMessage : ErrorMessage, "%s\n", message.c_str());
-		}
-	}
+	HeatersToActiveOrStandby(true);
 
-	if (spindleNumber > -1)
+	if (spindleNumber >= 0)
 	{
 		Spindle& spindle = reprap.GetPlatform().AccessSpindle(spindleNumber);
 
@@ -458,43 +439,37 @@ void Tool::Activate() noexcept
 	state = ToolState::active;
 }
 
-void Tool::HeatersToStandby() const noexcept
+void Tool::Standby() noexcept
 {
-	const Tool * const currentTool = reprap.GetCurrentTool();
-	for (size_t heater = 0; heater < heaterCount; heater++)
+	HeatersToActiveOrStandby(false);
+
+	// NIST Standard M6 says "When the tool change is complete: * The spindle will be stopped. [...]"
+	// We don't have M6 but Tn already does tool change so we need
+	// to make sure the spindle is off
+	if (spindleNumber >= 0)
 	{
-		// Don't switch a heater to standby if the active tool is using it and is different from this tool
-		if (currentTool == this || currentTool == nullptr || !currentTool->UsesHeater(heater))
-		{
-			try
-			{
-				reprap.GetHeat().SetStandbyTemperature(heaters[heater], standbyTemperatures[heater]);
-				reprap.GetHeat().Standby(heaters[heater], this);
-			}
-			catch (const GCodeException& exc)
-			{
-				String<StringLength100> message;
-				exc.GetMessage(message.GetRef(), nullptr);
-				reprap.GetPlatform().Message(ErrorMessage, message.c_str());
-			}
-		}
+		Spindle& spindle = reprap.GetPlatform().AccessSpindle(spindleNumber);
+		spindle.SetState(SpindleState::stopped);
 	}
+
+	state = ToolState::standby;
 }
 
-void Tool::HeatersToActive() const noexcept
+void Tool::HeatersToActiveOrStandby(bool active) const noexcept
 {
 	const Tool * const currentTool = reprap.GetCurrentTool();
-	for (size_t heater = 0; heater < heaterCount; heater++)
+	for (size_t heaterIndex = 0; heaterIndex < heaterCount; heaterIndex++)
 	{
+		const int heaterNumber = heaters[heaterIndex];
 		// Don't switch a heater to active if the active tool is using it and is different from this tool
-		if (currentTool == this || currentTool == nullptr || !currentTool->UsesHeater(heater))
+		if (currentTool == this || currentTool == nullptr || !currentTool->UsesHeater(heaterNumber))
 		{
 			String<StringLength100> message;
 			GCodeResult ret;
 			try
 			{
-				reprap.GetHeat().SetActiveTemperature(heaters[heater], activeTemperatures[heater]);
-				ret = reprap.GetHeat().Activate(heaters[heater], message.GetRef());
+				reprap.GetHeat().SetTemperature(heaterNumber, ((active) ? activeTemperatures[heaterIndex] : standbyTemperatures[heaterIndex]), active);
+				ret = reprap.GetHeat().SetActiveOrStandby(heaterNumber, this, active, message.GetRef());
 			}
 			catch (const GCodeException& exc)
 			{
@@ -512,30 +487,15 @@ void Tool::HeatersToActive() const noexcept
 void Tool::HeatersToOff() const noexcept
 {
 	const Tool * const currentTool = reprap.GetCurrentTool();
-	for (size_t heater = 0; heater < heaterCount; heater++)
+	for (size_t heaterIndex = 0; heaterIndex < heaterCount; heaterIndex++)
 	{
+		const int heaterNumber = heaters[heaterIndex];
 		// Don't switch a heater to standby if the active tool is using it and is different from this tool
-		if (currentTool == this || currentTool == nullptr || !currentTool->UsesHeater(heater))
+		if (currentTool == this || currentTool == nullptr || !currentTool->UsesHeater(heaterNumber))
 		{
-			reprap.GetHeat().SwitchOff(heaters[heater]);
+			reprap.GetHeat().SwitchOff(heaterNumber);
 		}
 	}
-}
-
-void Tool::Standby() noexcept
-{
-	HeatersToStandby();
-
-	// NIST Standard M6 says "When the tool change is complete: * The spindle will be stopped. [...]"
-	// We don't have M6 but Tn already does tool change so we need
-	// to make sure the spindle is off
-	if (spindleNumber > -1)
-	{
-		Spindle& spindle = reprap.GetPlatform().AccessSpindle(spindleNumber);
-		spindle.SetState(SpindleState::stopped);
-	}
-
-	state = ToolState::standby;
 }
 
 // May be called from ISR
@@ -650,47 +610,18 @@ float Tool::GetToolHeaterStandbyTemperature(size_t heaterNumber) const noexcept
 	return (heaterNumber < heaterCount) ? standbyTemperatures[heaterNumber] : 0.0;
 }
 
-void Tool::SetToolHeaterActiveTemperature(size_t heaterNumber, float temp) THROWS(GCodeException)
+void Tool::SetToolHeaterActiveOrStandbyTemperature(size_t heaterNumber, float temp, bool active) THROWS(GCodeException)
 {
 	if (heaterNumber < heaterCount)
 	{
-		const int8_t heater = heaters[heaterNumber];
-		const Tool * const currentTool = reprap.GetCurrentTool();
-		const bool setHeater = (currentTool == nullptr || currentTool == this);
-		if (temp < NEARLY_ABS_ZERO)								// temperatures close to ABS_ZERO turn off the heater
-		{
-			activeTemperatures[heaterNumber] = 0;
-			if (setHeater)
-			{
-				reprap.GetHeat().SwitchOff(heater);
-			}
-		}
-		else
-		{
-			if (temp <= reprap.GetHeat().GetLowestTemperatureLimit(heater) || temp >= reprap.GetHeat().GetHighestTemperatureLimit(heater))
-			{
-				throw GCodeException(-1, -1, "Requested temperature out of range");
-			}
-			activeTemperatures[heaterNumber] = temp;
-			if (setHeater)
-			{
-				reprap.GetHeat().SetActiveTemperature(heater, temp);
-			}
-		}
-	}
-}
-
-void Tool::SetToolHeaterStandbyTemperature(size_t heaterNumber, float temp) THROWS(GCodeException)
-{
-	if (heaterNumber < heaterCount)
-	{
+		float& relevantTemperature = (active) ? activeTemperatures[heaterNumber] : standbyTemperatures[heaterNumber];
 		const int8_t heater = heaters[heaterNumber];
 		const Tool * const currentTool = reprap.GetCurrentTool();
 		const Tool * const lastStandbyTool = reprap.GetHeat().GetLastStandbyTool(heater);
-		const bool setHeater = (currentTool == nullptr || currentTool == this || lastStandbyTool == nullptr || lastStandbyTool == this);
-		if (temp < NEARLY_ABS_ZERO)								// temperatures close to ABS_ZERO turn off the heater
+		const bool setHeater = (currentTool == nullptr || currentTool == this || (!active && (lastStandbyTool == nullptr || lastStandbyTool == this)));
+		if (temp <= NEARLY_ABS_ZERO)								// temperatures close to ABS_ZERO turn off the heater
 		{
-			standbyTemperatures[heaterNumber] = 0;
+			relevantTemperature = 0;
 			if (setHeater)
 			{
 				reprap.GetHeat().SwitchOff(heater);
@@ -702,10 +633,10 @@ void Tool::SetToolHeaterStandbyTemperature(size_t heaterNumber, float temp) THRO
 			{
 				throw GCodeException(-1, -1, "Requested temperature out of range");
 			}
-			standbyTemperatures[heaterNumber] = temp;
+			relevantTemperature = temp;
 			if (setHeater)
 			{
-				reprap.GetHeat().SetStandbyTemperature(heater, temp);
+				reprap.GetHeat().SetTemperature(heater, temp, active);
 			}
 		}
 	}

@@ -6,6 +6,9 @@
  */
 
 #include "WifiFirmwareUploader.h"
+
+#if HAS_WIFI_NETWORKING && (HAS_MASS_STORAGE || HAS_EMBEDDED_FILES)
+
 #include "WiFiInterface.h"
 
 #include <Platform/Platform.h>
@@ -765,5 +768,7 @@ void WifiFirmwareUploader::SendUpdateFile(const char *file, uint32_t address) no
 	connectAttemptNumber = 0;
 	state = UploadState::resetting;
 }
+
+#endif	// HAS_WIFI_NETWORKING
 
 // End

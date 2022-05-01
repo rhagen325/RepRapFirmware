@@ -119,13 +119,17 @@ constexpr uint32_t maxPidSpinDelay = 5000;			// Maximum elapsed time in millisec
 enum class BoardType : uint8_t
 {
 	Auto = 0,
-#if defined(DUET3MINI)			// we use the same values for both v0.2 and v0.4
+#if defined(DUET3MINI_V04)			// we use the same values for both v0.2 and v0.4
 	Duet3Mini_Unknown,
 	Duet3Mini_WiFi,
 	Duet3Mini_Ethernet,
-#elif defined(DUET3)
-	Duet3_v06_100 = 1,
-	Duet3_v101 = 2,
+#elif defined(DUET3_MB6HC)
+	Duet3_6HC_v06_100 = 1,
+	Duet3_6HC_v101 = 2,
+#elif defined(DUET3_MB6XD)
+	Duet3_6XD = 1,
+#elif defined(FMDC_V02)
+	FMDC,
 #elif defined(SAME70XPLD)
 	SAME70XPLD_0 = 1
 #elif defined(DUET_NG)
@@ -137,18 +141,8 @@ enum class BoardType : uint8_t
 	Duet2SBC_102 = 6,
 #elif defined(DUET_M)
 	DuetM_10 = 1,
-#elif defined(DUET_06_085)
-	Duet_06 = 1,
-	Duet_07 = 2,
-	Duet_085 = 3
-#elif defined(__RADDS__)
-	RADDS_15 = 1
 #elif defined(PCCB_10)
 	PCCB_v10 = 1
-#elif defined(PCCB_08) || defined(PCCB_08_X5)
-	PCCB_v08 = 1
-#elif defined(DUET3MINI)
-	Duet_5LC = 1
 #elif defined(__LPC17xx__)
 	Lpc = 1
 #else
@@ -218,7 +212,8 @@ public:
 
 	void Init(uint16_t val) volatile noexcept
 	{
-		const irqflags_t flags = IrqSave();
+		AtomicCriticalSectionLocker lock;
+
 		sum = (uint32_t)val * (uint32_t)numAveraged;
 		index = 0;
 		isValid = false;
@@ -226,7 +221,6 @@ public:
 		{
 			readings[i] = val;
 		}
-		IrqRestore(flags);
 	}
 
 	// Call this to put a new reading into the filter
@@ -342,6 +336,7 @@ public:
 	GCodeResult HandleM81(GCodeBuffer& gb, const StringRef& reply) THROWS(GCodeException);
 	void AtxPowerOff() noexcept;
 	bool IsAtxPowerControlled() const noexcept { return PsOnPort.IsValid(); }
+	bool IsDeferredPowerDown() const noexcept { return deferredPowerDown; }
 	const IoPort& GetAtxPowerPort() const noexcept { return PsOnPort; }
 
 	BoardType GetBoardType() const noexcept { return board; }
@@ -359,9 +354,16 @@ public:
 #endif
 
 #ifdef DUET_NG
-	bool IsDueXPresent() const noexcept { return expansionBoard != ExpansionBoardType::none; }
 	const char *_ecv_array GetBoardName() const noexcept;
 	const char *_ecv_array GetBoardShortName() const noexcept;
+
+	const float GetDefaultThermistorSeriesR(size_t inputNumber) const noexcept
+	{
+		// This is only called from one place so we may as well inline it
+		return (inputNumber >= 3 && (expansionBoard == ExpansionBoardType::DueX5_v0_11 || expansionBoard == ExpansionBoardType::DueX2_v0_11))
+			? DefaultThermistorSeriesR_DueX_v0_11
+				: DefaultThermistorSeriesR;
+	}
 #endif
 
 	const MacAddress& GetDefaultMacAddress() const noexcept { return defaultMacAddress; }
@@ -386,7 +388,7 @@ public:
     void EnableAux(size_t auxNumber) noexcept;
     bool IsAuxRaw(size_t auxNumber) const noexcept;
 	void SetAuxRaw(size_t auxNumber, bool raw) noexcept;
-#if HAS_AUX_DEVICES
+#if SUPPORT_PANELDUE_FLASH
 	PanelDueUpdater* GetPanelDueUpdater() noexcept { return panelDueUpdater; }
 	void InitPanelDueUpdater() noexcept;
 #endif
@@ -409,15 +411,15 @@ public:
 
 	// File functions
 #if HAS_MASS_STORAGE || HAS_SBC_INTERFACE || HAS_EMBEDDED_FILES
-	FileStore* OpenFile(const char *_ecv_array folder, const char* fileName, OpenMode mode, uint32_t preAllocSize = 0) const noexcept;
+	FileStore* OpenFile(const char *_ecv_array folder, const char *_ecv_array fileName, OpenMode mode, uint32_t preAllocSize = 0) const noexcept;
 	bool FileExists(const char *_ecv_array folder, const char *_ecv_array filename) const noexcept;
 # if HAS_MASS_STORAGE || HAS_SBC_INTERFACE
 	bool Delete(const char *_ecv_array folder, const char *_ecv_array filename) const noexcept;
-#endif
+# endif
 
-	const char *_ecv_array GetWebDir() const noexcept; 					// Where the html etc files are
-	const char *_ecv_array GetGCodeDir() const noexcept; 				// Where the gcodes are
-	const char *_ecv_array GetMacroDir() const noexcept;				// Where the user-defined macros are
+	static const char *_ecv_array GetWebDir() noexcept; 		// Where the html etc files are
+	static const char *_ecv_array GetGCodeDir() noexcept; 		// Where the gcodes are
+	static const char *_ecv_array GetMacroDir() noexcept;		// Where the user-defined macros are
 
 	// Functions to work with the system files folder
 	GCodeResult SetSysDir(const char *_ecv_array dir, const StringRef& reply) noexcept;				// Set the system files path
@@ -468,6 +470,11 @@ public:
 	unsigned int GetMicrostepping(size_t axisOrExtruder, bool& interpolation) const noexcept;
 	void SetDriverStepTiming(size_t driver, const float microseconds[4]) noexcept;
 	bool GetDriverStepTiming(size_t driver, float microseconds[4]) const noexcept;
+
+#ifdef DUET3_MB6XD
+	void GetActualDriverTimings(float timings[4]) noexcept;
+#endif
+
 	float DriveStepsPerUnit(size_t axisOrExtruder) const noexcept;
 	const float *_ecv_array GetDriveStepsPerUnit() const noexcept
 		{ return driveStepsPerUnit; }
@@ -511,14 +518,26 @@ public:
 	uint32_t GetDriversBitmap(size_t axisOrExtruder) const noexcept	// get the bitmap of driver step bits for this axis or extruder
 		pre(axisOrExtruder < MaxAxesPlusExtruders + NumDirectDrivers)
 		{ return driveDriverBits[axisOrExtruder]; }
+
+#ifdef DUET3_MB6XD		// the first element has a special meaning when we use a TC to generate the steps
+	uint32_t GetSlowDriverStepPeriodClocks() { return stepPulseMinimumPeriodClocks; }
+	uint32_t GetSlowDriverDirHoldClocksFromLeadingEdge() { return directionHoldClocksFromLeadingEdge; }
+	uint32_t GetSlowDriverDirSetupClocks() const noexcept { return directionSetupClocks; }
+#else
 	uint32_t GetSlowDriversBitmap() const noexcept { return slowDriversBitmap; }
 	uint32_t GetSlowDriverStepHighClocks() const noexcept { return slowDriverStepTimingClocks[0]; }
 	uint32_t GetSlowDriverStepLowClocks() const noexcept { return slowDriverStepTimingClocks[1]; }
+	uint32_t GetSlowDriverDirHoldClocksFromTrailingEdge() const noexcept { return slowDriverStepTimingClocks[3]; }
 	uint32_t GetSlowDriverDirSetupClocks() const noexcept { return slowDriverStepTimingClocks[2]; }
-	uint32_t GetSlowDriverDirHoldClocks() const noexcept { return slowDriverStepTimingClocks[3]; }
+#endif
+
 	uint32_t GetSteppingEnabledDrivers() const noexcept { return steppingEnabledDriversBitmap; }
 	void DisableSteppingDriver(uint8_t driver) noexcept { steppingEnabledDriversBitmap &= ~StepPins::CalcDriverBitmap(driver); }
 	void EnableAllSteppingDrivers() noexcept { steppingEnabledDriversBitmap = 0xFFFFFFFFu; }
+
+#ifdef DUET3_MB6XD
+	bool HasDriverError(size_t driver) const noexcept;
+#endif
 
 #if SUPPORT_NONLINEAR_EXTRUSION
 	const NonlinearExtrusion& GetExtrusionCoefficients(size_t extruder) const noexcept pre(extruder < MaxExtruders) { return nonlinearExtrusion[extruder]; }
@@ -648,6 +667,7 @@ public:
 	GCodeResult EutProcessM569(const CanMessageGeneric& msg, const StringRef& reply) noexcept;
 	GCodeResult EutProcessM569Point2(const CanMessageGeneric& msg, const StringRef& reply) noexcept;
 	GCodeResult EutProcessM569Point7(const CanMessageGeneric& msg, const StringRef& reply) noexcept;
+	GCodeResult EutProcessM915(const CanMessageGeneric& msg, const StringRef& reply) noexcept;
 	void SendDriversStatus(CanMessageBuffer& buf) noexcept;
 #endif
 
@@ -682,6 +702,16 @@ private:
 
 #if HAS_SMART_DRIVERS
 	void ReportDrivers(MessageType mt, DriversBitmap& whichDrivers, const char *_ecv_array text, bool& reported) noexcept;
+#endif
+
+	// Convert microseconds to step clocks, rounding up to the next step clock
+	static constexpr uint32_t MicrosecondsToStepClocks(float us) noexcept
+	{
+		return (uint32_t)ceilf((float)StepClockRate * 0.000001 * us);
+	}
+
+#ifdef DUET3_MB6XD
+	void UpdateDriverTimings() noexcept;
 #endif
 
 #if HAS_MASS_STORAGE
@@ -722,6 +752,11 @@ private:
 
 	bool directions[NumDirectDrivers];
 	int8_t enableValues[NumDirectDrivers];
+
+#ifdef DUET3_MB6XD
+	bool driverErrPinsActiveLow;
+#endif
+
 	IoPort brakePorts[NumDirectDrivers];
 
 	float motorCurrents[MaxAxesPlusExtruders];				// the normal motor current for each stepper driver
@@ -750,8 +785,15 @@ private:
 #endif
 
 	DriverId extruderDrivers[MaxExtruders];					// the driver number assigned to each extruder
-	uint32_t slowDriverStepTimingClocks[4];					// minimum step high, step low, dir setup and dir hold timing for slow drivers
+#ifdef DUET3_MB6XD
+	float driverTimingMicroseconds[NumDirectDrivers][4];	// step high time, step low time, direction setup time to step high, direction hold time from step low (1 set per driver)
+	uint32_t stepPulseMinimumPeriodClocks;					// minimum period between leading edges of step pulses, in step clocks
+	uint32_t directionSetupClocks;							// minimum direction change to step high time, in step clocks
+	uint32_t directionHoldClocksFromLeadingEdge;			// minimum step high to direction low step clocks, calculated from the step low to direction change hold time
+#else
 	uint32_t slowDriversBitmap;								// bitmap of driver port bits that need extended step pulse timing
+	uint32_t slowDriverStepTimingClocks[4];					// minimum step high, step low, dir setup and dir hold timing for slow drivers
+#endif
 	uint32_t steppingEnabledDriversBitmap;					// mask of driver bits that we haven't disabled temporarily
 	float idleCurrentFactor;
 	float minimumMovementSpeed;								// minimum allowed movement speed in mm per step clock
@@ -760,9 +802,10 @@ private:
 	size_t numSmartDrivers;											// the number of TMC drivers we have, the remaining are simple enable/step/dir drivers
 	DriversBitmap temperatureShutdownDrivers, temperatureWarningDrivers, shortToGroundDrivers;
 	MillisTimer openLoadTimers[MaxSmartDrivers];
-	StandardDriverStatus lastEventStatus[MaxSmartDrivers];
-	uint8_t nextDriveToPoll;
 #endif
+
+	StandardDriverStatus lastEventStatus[NumDirectDrivers];
+	uint8_t nextDriveToPoll;
 
 	bool driversPowered;
 
@@ -823,6 +866,8 @@ private:
 
 #if HAS_AUX_DEVICES
 	AuxDevice auxDevices[NumSerialChannels - 1];
+#endif
+#if SUPPORT_PANELDUE_FLASH
 	PanelDueUpdater* panelDueUpdater;
 #endif
 
@@ -900,18 +945,18 @@ private:
 #if HAS_MASS_STORAGE || HAS_SBC_INTERFACE || HAS_EMBEDDED_FILES
 
 // Where the htm etc files are
-inline const char *_ecv_array Platform::GetWebDir() const noexcept
+inline const char *_ecv_array Platform::GetWebDir() noexcept
 {
 	return WEB_DIR;
 }
 
 // Where the gcodes are
-inline const char *_ecv_array Platform::GetGCodeDir() const noexcept
+inline const char *_ecv_array Platform::GetGCodeDir() noexcept
 {
 	return GCODE_DIR;
 }
 
-inline const char *_ecv_array Platform::GetMacroDir() const noexcept
+inline const char *_ecv_array Platform::GetMacroDir() noexcept
 {
 	return MACRO_DIR;
 }

@@ -53,12 +53,14 @@ private:
 
 	// G-Code parser methods
 	bool FindHeight(const char *_ecv_array bufp, size_t len) noexcept;
+	bool FindNumLayers(const char *_ecv_array bufp, size_t len) noexcept;
 	bool FindLayerHeight(const char *_ecv_array bufp) noexcept;
 	bool FindSlicerInfo(const char *_ecv_array bufp) noexcept;
 	bool FindPrintTime(const char *_ecv_array bufp) noexcept;
 	bool FindSimulatedTime(const char *_ecv_array bufp) noexcept;
 	unsigned int FindFilamentUsed(const char *_ecv_array bufp) noexcept;
 	void FindFilamentUsedEmbedded(const char *_ecv_array p, const char *_ecv_array s1, const char *_ecv_array s2, unsigned int &filamentsFound) noexcept;
+	bool FindThumbnails(const char *_ecv_array bufp, FilePosition bufferStartFilePosition) noexcept;
 
 	// We parse G-Code files in multiple stages. These variables hold the required information
 	Mutex parserMutex;

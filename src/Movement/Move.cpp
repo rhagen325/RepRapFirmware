@@ -103,6 +103,8 @@ constexpr ObjectModelTableEntry Move::objectModelTable[] =
 	{ "extruders",				OBJECT_MODEL_FUNC_NOSELF(&extrudersArrayDescriptor),											ObjectModelEntryFlags::live },
 	{ "idle",					OBJECT_MODEL_FUNC(self, 1),																		ObjectModelEntryFlags::none },
 	{ "kinematics",				OBJECT_MODEL_FUNC(self->kinematics),															ObjectModelEntryFlags::none },
+	{ "limitAxes",				OBJECT_MODEL_FUNC_NOSELF(reprap.GetGCodes().LimitAxes()),										ObjectModelEntryFlags::none },
+	{ "noMovesBeforeHoming",	OBJECT_MODEL_FUNC_NOSELF(reprap.GetGCodes().NoMovesBeforeHoming()),								ObjectModelEntryFlags::none },
 	{ "printingAcceleration",	OBJECT_MODEL_FUNC(InverseConvertAcceleration(self->maxPrintingAcceleration), 1),				ObjectModelEntryFlags::none },
 	{ "queue",					OBJECT_MODEL_FUNC_NOSELF(&queueArrayDescriptor),												ObjectModelEntryFlags::none },
 #if SUPPORT_COORDINATE_ROTATION
@@ -120,14 +122,14 @@ constexpr ObjectModelTableEntry Move::objectModelTable[] =
 	{ "timeout",				OBJECT_MODEL_FUNC(0.001f * (float)self->idleTimeout, 1),										ObjectModelEntryFlags::none },
 
 	// 2. move.currentMove members
-	{ "acceleration",			OBJECT_MODEL_FUNC(InverseConvertAcceleration(self->GetAcceleration()), 1),						ObjectModelEntryFlags::live },
-	{ "deceleration",			OBJECT_MODEL_FUNC(InverseConvertAcceleration(self->GetDeceleration()), 1),						ObjectModelEntryFlags::live },
+	{ "acceleration",			OBJECT_MODEL_FUNC(self->GetAccelerationMmPerSecSquared(), 1),									ObjectModelEntryFlags::live },
+	{ "deceleration",			OBJECT_MODEL_FUNC(self->GetDecelerationMmPerSecSquared(), 1),									ObjectModelEntryFlags::live },
 # if SUPPORT_LASER
 	{ "laserPwm",				OBJECT_MODEL_FUNC_IF_NOSELF(reprap.GetGCodes().GetMachineType() == MachineType::laser,
 															reprap.GetPlatform().GetLaserPwm(), 2),								ObjectModelEntryFlags::live },
 # endif
-	{ "requestedSpeed",			OBJECT_MODEL_FUNC(InverseConvertSpeedToMmPerSec(self->GetRequestedSpeed()), 1),					ObjectModelEntryFlags::live },
-	{ "topSpeed",				OBJECT_MODEL_FUNC(InverseConvertSpeedToMmPerSec(self->GetTopSpeed()), 1),						ObjectModelEntryFlags::live },
+	{ "requestedSpeed",			OBJECT_MODEL_FUNC(self->GetRequestedSpeedMmPerSec(), 1),										ObjectModelEntryFlags::live },
+	{ "topSpeed",				OBJECT_MODEL_FUNC(self->GetTopSpeedMmPerSec(), 1),												ObjectModelEntryFlags::live },
 
 	// 3. move.calibration members
 	{ "final",					OBJECT_MODEL_FUNC(self, 5),																		ObjectModelEntryFlags::none },
@@ -173,7 +175,7 @@ constexpr ObjectModelTableEntry Move::objectModelTable[] =
 constexpr uint8_t Move::objectModelTableDescriptor[] =
 {
 	9 + SUPPORT_COORDINATE_ROTATION,
-	15 + SUPPORT_WORKPLACE_COORDINATES,
+	17 + SUPPORT_WORKPLACE_COORDINATES,
 	2,
 	4 + SUPPORT_LASER,
 	3,
@@ -376,10 +378,9 @@ void Move::Exit() noexcept
 		}
 
 		// We need to be woken when one of the following is true:
-		// 1. If noMoveAvailable is true, when a new move becomes available.
-		// 2. If moves are being executed and there are unprepared moves in the queue, when it is time to prepare more moves.
-		// 3. If the queue was full and all moves in it were prepared and noMoveAvailable is false, when we have completed one or more moves.
-		// 4. In order to implement idle timeout, we must wake up regularly anyway, say every half second
+		// 1. If moves are being executed and there are unprepared moves in the queue, when it is time to prepare more moves.
+		// 2. If the queue was full and all moves in it were prepared, when we have completed one or more moves.
+		// 3. In order to implement idle timeout, we must wake up regularly anyway, say every half second
 		if (!moveRead && nextPrepareDelay != 0)
 		{
 			TaskBase::Take(min<uint32_t>(nextPrepareDelay, 500));
@@ -761,6 +762,8 @@ bool Move::LoadHeightMapFromFile(FileStore *f, const char *fname, const StringRe
 	{
 		zShift = 0.0;
 	}
+	float minError, maxError;
+	(void)heightMap.GetStatistics(latestMeshDeviation, minError, maxError);
 	reprap.MoveUpdated();
 	return err;
 }
@@ -1162,9 +1165,10 @@ void Move::SetInitialCalibrationDeviation(const Deviation& d) noexcept
 	reprap.MoveUpdated();
 }
 
+// Set the mesh deviation. Caller must call MoveUpdated() after calling this. We don't do that here because the caller may change Move in other ways first.
 void Move::SetLatestMeshDeviation(const Deviation& d) noexcept
 {
-	latestMeshDeviation = d; reprap.MoveUpdated();
+	latestMeshDeviation = d;
 }
 
 const char *Move::GetCompensationTypeString() const noexcept

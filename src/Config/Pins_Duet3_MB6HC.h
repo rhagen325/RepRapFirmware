@@ -1,5 +1,5 @@
-#ifndef PINS_DUET3_V06_H__
-#define PINS_DUET3_V06_H__
+#ifndef PINS_DUET3_MB6HC_H__
+#define PINS_DUET3_MB6HC_H__
 
 #include <PinDescription.h>
 
@@ -80,8 +80,8 @@ constexpr size_t MaxDriversPerAxis = 8;				// The maximum number of stepper driv
 constexpr size_t MaxExtruders = 16;					// The maximum number of extruders
 constexpr size_t MaxAxesPlusExtruders = 25;			// May be <= MaxAxes + MaxExtruders
 
-constexpr size_t MaxHeatersPerTool = 8;
-constexpr size_t MaxExtrudersPerTool = 8;
+constexpr size_t MaxHeatersPerTool = 20;			// Increased in 3.4 due to OEM requirement
+constexpr size_t MaxExtrudersPerTool = 10;			// Increased in 3.4 due to OEM requirement
 
 constexpr unsigned int MaxTriggers = 32;			// Must be <= 32 because we store a bitmap of pending triggers in a uint32_t
 
@@ -151,10 +151,10 @@ constexpr Pin DiagPin = PortCPin(20);
 constexpr bool DiagOnPolarity = true;
 
 // SD cards
-constexpr size_t NumSdCards = 1;
-constexpr Pin SdCardDetectPins[1] = { PortAPin(29) };
-constexpr Pin SdWriteProtectPins[1] = { NoPin };
-constexpr Pin SdSpiCSPins[1] = { NoPin };
+constexpr size_t NumSdCards = 2;											// we now allow one SPI-connected SD card to be configured at boot time
+constexpr Pin SdCardDetectPins[NumSdCards] = { PortAPin(29), NoPin };		// the CD pin for the second SD card is allocated using M950
+constexpr Pin SdWriteProtectPins[NumSdCards] = { NoPin, NoPin };
+constexpr Pin SdSpiCSPins[1] = { NoPin };									// this one is allocated using M950
 constexpr uint32_t ExpectedSdCardSpeed = 25000000;
 constexpr IRQn SdhcIRQn = HSMCI_IRQn;
 
@@ -436,4 +436,4 @@ namespace StepPins
 	}
 }
 
-#endif
+#endif	//ifndef PINS_DUET3_MB6HC_H__

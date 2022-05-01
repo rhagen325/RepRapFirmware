@@ -27,7 +27,6 @@ constexpr uint32_t IAP_IMAGE_START = 0x20018000;
 #define HAS_CPU_TEMP_SENSOR		1
 #define HAS_HIGH_SPEED_SD		1
 #define SUPPORT_TMC22xx			1
-#define TMC22xx_HAS_MUX			1
 #define HAS_VOLTAGE_MONITOR		1
 #define ENFORCE_MAX_VIN			0
 #define HAS_VREF_MONITOR		1
@@ -61,7 +60,6 @@ constexpr size_t MaxMonitorsPerHeater = 3;			// The maximum number of monitors p
 
 constexpr size_t MaxBedHeaters = 2;
 constexpr size_t MaxChamberHeaters = 2;
-constexpr int8_t DefaultBedHeater = 0;
 constexpr int8_t DefaultE0Heater = 1;				// Index of the default first extruder heater, used only for the legacy status response
 
 constexpr size_t NumThermistorInputs = 4;
@@ -132,7 +130,7 @@ constexpr GpioPinFunction TMC22xxUartPeriphMode = UART0PeriphMode;
 #define TMC22xx_SINGLE_DRIVER			0
 #define TMC22xx_HAS_MUX					1
 #define TMC22xx_USE_SLAVEADDR			0
-#define TMC22xx_DEFAULT_STEALTHCHOP		1
+#define TMC22xx_DEFAULT_STEALTHCHOP		0
 
 // Define the baud rate used to send/receive data to/from the drivers.
 // If we assume a worst case clock frequency of 8MHz then the maximum baud rate is 8MHz/16 = 500kbaud.

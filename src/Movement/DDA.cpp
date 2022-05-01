@@ -153,7 +153,7 @@ DDA::DDA(DDA* n) noexcept : next(n), prev(nullptr), state(empty)
 		ep = 0;
 	}
 
-	flags.all = 0;						// in particular we need to set endCoordinatesValid and usePressureAdvance to false
+	flags.all = 0;						// in particular we need to set endCoordinatesValid and usePressureAdvance to false, also checkEndstops false for the ATE build
 	virtualExtruderPosition = 0.0;
 	filePos = noFilePosition;
 
@@ -316,8 +316,10 @@ bool DDA::InitStandardMove(DDARing& ring, const RawMove &nextMove, bool doMotorM
 		{
 			return false;												// throw away the move if it couldn't be transformed
 		}
+#if SUPPORT_LINEAR_DELTA
 		flags.isDeltaMovement = move.IsDeltaMode()
 							&& (endPoint[X_AXIS] != positionNow[X_AXIS] || endPoint[Y_AXIS] != positionNow[Y_AXIS] || endPoint[Z_AXIS] != positionNow[Z_AXIS]);
+#endif
 	}
 
 	bool linearAxesMoving = false;
@@ -718,6 +720,8 @@ bool DDA::InitFromRemote(const CanMessageMovementLinear& msg) noexcept
 	params.unshaped.accelClocks = msg.accelerationClocks;
 	params.unshaped.steadyClocks = msg.steadyClocks;
 	params.unshaped.decelClocks = msg.decelClocks;
+	params.unshaped.acceleration = acceleration;
+	params.unshaped.deceleration = deceleration;
 
 	shapedSegments = unshapedSegments = nullptr;
 	activeDMs = completedDMs = nullptr;
@@ -1083,6 +1087,7 @@ float DDA::AdvanceBabyStepping(DDARing& ring, size_t axis, float amount) noexcep
 
 		// Even if there is no babystepping to do this move, we may need to adjust the end coordinates
 		cdda->endCoordinates[Z_AXIS] += babySteppingDone;
+#if SUPPORT_LINEAR_DELTA
 		if (cdda->flags.isDeltaMovement)
 		{
 			for (size_t motor = 0; motor < reprap.GetGCodes().GetTotalAxes(); ++motor)
@@ -1094,6 +1099,7 @@ float DDA::AdvanceBabyStepping(DDARing& ring, size_t axis, float amount) noexcep
 			}
 		}
 		else
+#endif
 		{
 			cdda->endPoint[Z_AXIS] += (int32_t)(babySteppingDone * reprap.GetPlatform().DriveStepsPerUnit(Z_AXIS));
 		}
@@ -1318,26 +1324,28 @@ void DDA::Prepare(SimulationMode simMode) noexcept
 
 	if (simMode < SimulationMode::normal)
 	{
+#if SUPPORT_LINEAR_DELTA
 		if (flags.isDeltaMovement)
 		{
 			// This code assumes that the previous move in the DDA ring is the previously-executed move, because it fetches the X and Y end coordinates from that move.
 			// Therefore the Move code must not store a new move in that entry until this one has been prepared! (It took me ages to track this down.)
 			// Ideally we would store the initial X and Y coordinates in the DDA, but we need to be economical with memory
-#if MS_USE_FPU
+# if MS_USE_FPU
 			// Nothing needed here, use directionVector[Z_AXIS] directly
-#else
+# else
 			afterPrepare.cKc = lrintf(directionVector[Z_AXIS] * MoveSegment::KdirectionVector);
-#endif
+# endif
 			params.a2plusb2 = fsquare(directionVector[X_AXIS]) + fsquare(directionVector[Y_AXIS]);
 			params.initialX = prev->GetEndCoordinate(X_AXIS, false);
 			params.initialY = prev->GetEndCoordinate(Y_AXIS, false);
-#if SUPPORT_CAN_EXPANSION
+			params.dparams = static_cast<const LinearDeltaKinematics*>(&(reprap.GetMove().GetKinematics()));
+# if SUPPORT_CAN_EXPANSION
 			params.finalX = GetEndCoordinate(X_AXIS, false);
 			params.finalY = GetEndCoordinate(Y_AXIS, false);
 			params.zMovement = GetEndCoordinate(Z_AXIS, false) - prev->GetEndCoordinate(Z_AXIS, false);
-#endif
-			params.dparams = static_cast<const LinearDeltaKinematics*>(&(reprap.GetMove().GetKinematics()));
+# endif
 		}
+#endif
 
 		activeDMs = completedDMs = nullptr;
 
@@ -1374,7 +1382,7 @@ void DDA::Prepare(SimulationMode simMode) noexcept
 #if SUPPORT_CAN_EXPANSION
 						if (driver.IsRemote())
 						{
-							CanMotion::AddMovement(params, driver, delta);
+							CanMotion::AddMovement(params, driver, delta, false);
 						}
 						else
 #endif
@@ -1403,6 +1411,7 @@ void DDA::Prepare(SimulationMode simMode) noexcept
 					}
 				}
 			}
+#if SUPPORT_LINEAR_DELTA
 			else if (flags.isDeltaMovement && reprap.GetMove().GetKinematics().GetMotionType(drive) == MotionType::segmentFreeDelta)
 			{
 				// On a delta we need to move all towers even if some of them have no net movement
@@ -1413,11 +1422,15 @@ void DDA::Prepare(SimulationMode simMode) noexcept
 				}
 
 				const int32_t delta = endPoint[drive] - prev->endPoint[drive];
-				if (platform.GetDriversBitmap(drive) != 0)					// if any of the drives is local
+				if (platform.GetDriversBitmap(drive) != 0						// if any of the drives is local
+#if SUPPORT_CAN_EXPANSION
+						|| flags.checkEndstops									// if checking endstops, create a DM even if there are no local drives involved
+#endif
+				   )
 				{
 					DriveMovement* const pdm = DriveMovement::Allocate(drive, DMState::idle);
 					pdm->direction = (delta >= 0);
-					pdm->totalSteps = labs(delta);							// this is net steps for now
+					pdm->totalSteps = labs(delta);								// this is net steps for now
 					if (pdm->PrepareDeltaAxis(*this, params))
 					{
 						pdm->directionChanged = false;
@@ -1436,7 +1449,7 @@ void DDA::Prepare(SimulationMode simMode) noexcept
 					}
 				}
 
-#if SUPPORT_CAN_EXPANSION
+# if SUPPORT_CAN_EXPANSION
 				afterPrepare.drivesMoving.SetBit(drive);
 				const AxisDriversConfig& config = platform.GetAxisDriversConfig(drive);
 				for (size_t i = 0; i < config.numDrivers; ++i)
@@ -1444,12 +1457,13 @@ void DDA::Prepare(SimulationMode simMode) noexcept
 					const DriverId driver = config.driverNumbers[i];
 					if (driver.IsRemote())
 					{
-						CanMotion::AddMovement(params, driver, delta);
+						CanMotion::AddMovement(params, driver, delta, false);
 					}
 				}
-#endif
+# endif
 				axisMotorsEnabled.SetBit(drive);
 			}
+#endif
 			else if (drive < reprap.GetGCodes().GetTotalAxes())
 			{
 				// It's a linear axis
@@ -1510,7 +1524,7 @@ void DDA::Prepare(SimulationMode simMode) noexcept
 						const DriverId driver = config.driverNumbers[i];
 						if (driver.IsRemote())
 						{
-							CanMotion::AddMovement(params, driver, delta);
+							CanMotion::AddMovement(params, driver, delta, false);
 						}
 					}
 #endif
@@ -1614,7 +1628,7 @@ void DDA::Prepare(SimulationMode simMode) noexcept
 		}
 
 #if SUPPORT_CAN_EXPANSION
-		const uint32_t canClocksNeeded = CanMotion::FinishMovement(afterPrepare.moveStartTime, simMode != SimulationMode::off);
+		const uint32_t canClocksNeeded = CanMotion::FinishMovement(*this, afterPrepare.moveStartTime, simMode != SimulationMode::off);
 		if (canClocksNeeded > clocksNeeded)
 		{
 			// Due to rounding error in the calculations, we quite often calculate the CAN move as being longer than our previously-calculated value, normally by just one clock.
@@ -1784,10 +1798,6 @@ float DDA::NormaliseLinearMotion(AxesBitmap linearAxes) noexcept
 // Either this move is currently executing (DDARing.currentDDA == this) and the state is 'executing', or we have almost finished preparing it and the state is 'provisional'.
 void DDA::CheckEndstops(Platform& platform) noexcept
 {
-#if SUPPORT_CAN_EXPANSION
-	const bool fromPrepare = (state == DDAState::provisional);		// determine this before anything sets the state to 'completed'
-#endif
-
 	for (;;)
 	{
 		const EndstopHitDetails hitDetails = platform.GetEndstops().CheckEndstops();
@@ -1796,7 +1806,7 @@ void DDA::CheckEndstops(Platform& platform) noexcept
 		case EndstopHitAction::stopAll:
 			MoveAborted();											// set the state to completed and recalculate the endpoints
 #if SUPPORT_CAN_EXPANSION
-			CanMotion::StopAll(fromPrepare);
+			CanMotion::StopAll(*this);
 #endif
 			if (hitDetails.isZProbe)
 			{
@@ -1817,14 +1827,7 @@ void DDA::CheckEndstops(Platform& platform) noexcept
 		case EndstopHitAction::stopAxis:
 			StopDrive(hitDetails.axis);								// we must stop the drive before we mess with its coordinates
 #if SUPPORT_CAN_EXPANSION
-			if (state == completed)									// if the call to StopDrive flagged the move as completed
-			{
-				CanMotion::StopAll(fromPrepare);
-			}
-			else
-			{
-				CanMotion::StopAxis(fromPrepare, hitDetails.axis);
-			}
+			CanMotion::StopAxis(*this, hitDetails.axis);
 #endif
 			if (hitDetails.setAxisLow)
 			{
@@ -1842,7 +1845,7 @@ void DDA::CheckEndstops(Platform& platform) noexcept
 #if SUPPORT_CAN_EXPANSION
 			if (hitDetails.driver.IsRemote())
 			{
-				CanMotion::StopDriver(fromPrepare, hitDetails.driver);
+				CanMotion::StopDriver(*this, hitDetails.axis, hitDetails.driver);
 			}
 			else
 #endif
@@ -1865,34 +1868,6 @@ void DDA::CheckEndstops(Platform& platform) noexcept
 			return;
 		}
 	}
-
-#if DDA_LOG_PROBE_CHANGES
-	else if ((endStopsToCheck & LogProbeChanges) != 0)
-	{
-		switch (platform.GetZProbeResult())
-		{
-		case EndStopHit::lowHit:
-			if (!probeTriggered)
-			{
-				probeTriggered = true;
-				LogProbePosition();
-			}
-			break;
-
-		case EndStopHit::nearStop:
-		case EndStopHit::noStop:
-			if (probeTriggered)
-			{
-				probeTriggered = false;
-				LogProbePosition();
-			}
-			break;
-
-		default:
-			break;
-		}
-	}
-#endif
 }
 
 // Start executing this move. Must be called with interrupts disabled or basepri >= set interrupt priority, to avoid a race condition.
@@ -1991,8 +1966,12 @@ pre(state == frozen)
 	}
 }
 
-uint32_t DDA::lastStepLowTime = 0;
-uint32_t DDA::lastDirChangeTime = 0;
+#ifdef DUET3_MB6XD
+volatile uint32_t DDA::lastStepHighTime = 0;
+#else
+volatile uint32_t DDA::lastStepLowTime = 0;
+#endif
+volatile uint32_t DDA::lastDirChangeTime = 0;
 
 #if 0	// debug only
 uint32_t DDA::stepsRequested[NumDirectDrivers];
@@ -2044,7 +2023,33 @@ void DDA::StepDrivers(Platform& p, uint32_t now) noexcept
 	}
 
 	driversStepping &= p.GetSteppingEnabledDrivers();
-#if SUPPORT_SLOW_DRIVERS											// if supporting slow drivers
+
+#ifdef DUET3_MB6XD
+	if (driversStepping != 0)
+	{
+		// Wait until step low and direction setup time have elapsed
+		const uint32_t locLastStepPulseTime = lastStepHighTime;
+		const uint32_t locLastDirChangeTime = lastDirChangeTime;
+		while (now - locLastStepPulseTime < p.GetSlowDriverStepPeriodClocks() || now - locLastDirChangeTime < p.GetSlowDriverDirSetupClocks())
+		{
+			now = StepTimer::GetTimerTicks();
+		}
+
+		StepPins::StepDriversLow(StepPins::AllDriversBitmap & (~driversStepping));		// disable the step pins of the drivers we don't want to step
+		StepPins::StepDriversHigh(driversStepping);										// set up the drivers that we do want to step
+
+		// Trigger the TC so that it generates a step pulse
+		STEP_GATE_TC->TC_CHANNEL[STEP_GATE_TC_CHAN].TC_CCR = TC_CCR_SWTRG;
+		lastStepHighTime = StepTimer::GetTimerTicks();
+
+		// Calculate the next step times
+		for (DriveMovement *dm2 = activeDMs; dm2 != dm; dm2 = dm2->nextDM)
+		{
+			(void)dm2->CalcNextStepTime(*this);						// calculate next step times
+		}
+	}
+#else
+# if SUPPORT_SLOW_DRIVERS											// if supporting slow drivers
 	if ((driversStepping & p.GetSlowDriversBitmap()) != 0)			// if using some slow drivers
 	{
 		// Wait until step low and direction setup time have elapsed
@@ -2067,12 +2072,12 @@ void DDA::StepDrivers(Platform& p, uint32_t now) noexcept
 		lastStepLowTime = StepTimer::GetTimerTicks();
 	}
 	else
-#endif
+# endif
 	{
 		StepPins::StepDriversHigh(driversStepping);					// step drivers high
-#if SAME70
+# if SAME70
 		__DSB();													// without this the step pulse can be far too short
-#endif
+# endif
 		for (DriveMovement *dm2 = activeDMs; dm2 != dm; dm2 = dm2->nextDM)
 		{
 			(void)dm2->CalcNextStepTime(*this);						// calculate next step times
@@ -2080,6 +2085,7 @@ void DDA::StepDrivers(Platform& p, uint32_t now) noexcept
 
 		StepPins::StepDriversLow(driversStepping);					// step drivers low
 	}
+#endif
 
 	// Remove those drives from the list, update the direction pins where necessary, and re-insert them so as to keep the list in step-time order.
 	DriveMovement *dmToInsert = activeDMs;							// head of the chain we need to re-insert

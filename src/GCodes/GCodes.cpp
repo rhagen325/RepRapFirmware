@@ -69,7 +69,11 @@ GCodes::GCodes(Platform& p) noexcept :
 #if HAS_VOLTAGE_MONITOR
 	, powerFailScript(nullptr)
 #endif
-	, isFlashing(false), isFlashingPanelDue(false), lastWarningMillis(0)
+	, isFlashing(false),
+#if SUPPORT_PANELDUE_FLASH
+	isFlashingPanelDue(false),
+#endif
+	lastWarningMillis(0)
 #if HAS_MASS_STORAGE
 	, sdTimingFile(nullptr)
 #endif
@@ -299,7 +303,9 @@ void GCodes::Reset() noexcept
 	moveState.filePos = noFilePosition;
 	firmwareUpdateModuleMap.Clear();
 	isFlashing = false;
+#if SUPPORT_PANELDUE_FLASH
 	isFlashingPanelDue = false;
+#endif
 	currentZProbeNumber = 0;
 
 	buildObjects.Init();
@@ -448,7 +454,7 @@ void GCodes::Spin() noexcept
 		{
 			nextGcodeSource = 0;
 		}
-		if (gbp != nullptr && (gbp != auxGCode || !isFlashingPanelDue))		// skip auxGCode while flashing PanelDue is in progress
+		if (gbp != nullptr && (gbp != auxGCode || !IsFlashingPanelDue()))	// skip auxGCode while flashing PanelDue is in progress
 		{
 			if (SpinGCodeBuffer(*gbp))										// if we did something useful
 			{
@@ -800,6 +806,7 @@ void GCodes::EndSimulation(GCodeBuffer *gb) noexcept
 	ToolOffsetTransform(moveState.currentUserPosition, moveState.coords);
 	reprap.GetMove().SetNewPosition(moveState.coords, true);
 	axesVirtuallyHomed = axesHomed;
+	reprap.MoveUpdated();
 }
 
 // Check for and execute triggers
@@ -1169,71 +1176,6 @@ bool GCodes::LowVoltageResume() noexcept
 		//TODO qq;
 		//platform.Message(LoggedGenericMessage, "Print auto-resumed\n");
 	}
-	return true;
-}
-
-#endif
-
-#if HAS_SMART_DRIVERS
-
-// Pause the print because the specified driver has reported a stall
-bool GCodes::PauseOnStall(DriversBitmap stalledDrivers) noexcept
-{
-	if (!IsReallyPrinting())
-	{
-		return true;								// if not printing, acknowledge it but take no action
-	}
-	if (!autoPauseGCode->IsCompletelyIdle())
-	{
-		return false;								// can't handle it yet
-	}
-	if (!LockMovement(*autoPauseGCode))
-	{
-		return false;
-	}
-
-	String<StringLength50> stallErrorString;
-	stallErrorString.printf("Stall detected on driver(s)");
-	ListDrivers(stallErrorString.GetRef(), stalledDrivers);
-	DoPause(*autoPauseGCode, PrintPausedReason::stall, GCodeState::pausing1);
-	platform.SendAlert(GenericMessage, stallErrorString.c_str(), "Printing paused", 1, 0.0, AxesBitmap());
-	stallErrorString.cat('\n');
-	platform.Message(LogWarn, stallErrorString.c_str());
-	return true;
-}
-
-// Re-home and resume the print because the specified driver has reported a stall
-bool GCodes::ReHomeOnStall(DriversBitmap stalledDrivers) noexcept
-{
-	if (!IsReallyPrinting())
-	{
-		return true;								// if not printing, acknowledge it but take no action
-	}
-	if (!DoEmergencyPause())
-	{
-		return false;								// can't handle it yet
-	}
-
-	// Evaluate which machine axes have stalled and create parameters for them
-	VariableSet vars;
-	for (size_t axis = 0; axis < numVisibleAxes; ++axis)
-	{
-		const AxisDriversConfig& cfg = platform.GetAxisDriversConfig(axis);
-		for (unsigned int i = 0; i < cfg.numDrivers; ++i)
-		{
-			//TODO handle remote stalled drivers
-			if (cfg.driverNumbers[i].IsLocal() && stalledDrivers.IsBitSet(cfg.driverNumbers[i].localDriver))
-			{
-				char str[2] = { axisLetters[axis], 0 };
-				vars.InsertNewParameter(str, ExpressionValue((int32_t)1));		// create a parameter with value 1 for the axis
-				break;
-			}
-		}
-	}
-
-	autoPauseGCode->SetState(GCodeState::resuming1);					// set up to resume after rehoming
-	pauseState = PauseState::resuming;
-	DoFileMacro(*autoPauseGCode, REHOME_G, true, AsyncSystemMacroCode, vars);	// run the SD card rehome-and-resume script
 	return true;
 }
 
@@ -2512,106 +2454,109 @@ bool GCodes::ReadMove(RawMove& m) noexcept
 		return false;
 	}
 
-	m = moveState;
-
-	if (moveState.segmentsLeft == 1)
+	while (true)		// loop while we skip move segments
 	{
-		// If there is just 1 segment left, it doesn't matter if it is an arc move or not, just move to the end position
-		if (segmentsLeftToStartAt == 1 && firstSegmentFractionToSkip != 0.0)	// if this is the segment we are starting at and we need to skip some of it
-		{
-			// Reduce the extrusion by the amount to be skipped
-			for (size_t extruder = 0; extruder < numExtruders; ++extruder)
-			{
-				m.coords[ExtruderToLogicalDrive(extruder)] *= (1.0 - firstSegmentFractionToSkip);
-			}
-		}
-		m.proportionDone = 1.0;
-		if (moveState.doingArcMove)
-		{
-			m.canPauseAfter = true;					// we can pause after the final segment of an arc move
-		}
-		ClearMove();
-	}
-	else
-	{
-		// This move needs to be divided into 2 or more segments
-		// Do the axes
-		AxesBitmap axisMap0, axisMap1;
-		if (moveState.doingArcMove)
-		{
-			moveState.arcCurrentAngle += moveState.arcAngleIncrement;
-			if (moveState.segmentsTillNextFullCalc == 0)
-			{
-				// Do the full calculation
-				moveState.segmentsTillNextFullCalc = SegmentsPerFulArcCalculation;
-				moveState.currentAngleCosine = cosf(moveState.arcCurrentAngle);
-				moveState.currentAngleSine = sinf(moveState.arcCurrentAngle);
-			}
-			else
-			{
-				// Speed up the computation by doing two multiplications and an addition or subtraction instead of a sine or cosine
-				--moveState.segmentsTillNextFullCalc;
-				const float newCosine = moveState.currentAngleCosine * moveState.angleIncrementCosine - moveState.currentAngleSine   * moveState.angleIncrementSine;
-				const float newSine   = moveState.currentAngleSine   * moveState.angleIncrementCosine + moveState.currentAngleCosine * moveState.angleIncrementSine;
-				moveState.currentAngleCosine = newCosine;
-				moveState.currentAngleSine = newSine;
-			}
-			axisMap0 = Tool::GetAxisMapping(moveState.tool, moveState.arcAxis0);
-			axisMap1 = Tool::GetAxisMapping(moveState.tool, moveState.arcAxis1);
-			moveState.cosXyAngle = (moveState.xyPlane) ? moveState.angleIncrementCosine : 1.0;
-		}
+		m = moveState;
 
-		for (size_t drive = 0; drive < numVisibleAxes; ++drive)
+		if (moveState.segmentsLeft == 1)
 		{
-			if (moveState.doingArcMove && axisMap1.IsBitSet(drive))
+			// If there is just 1 segment left, it doesn't matter if it is an arc move or not, just move to the end position
+			if (segmentsLeftToStartAt == 1 && firstSegmentFractionToSkip != 0.0)	// if this is the segment we are starting at and we need to skip some of it
 			{
-				// Axis1 or a substitute in the selected plane
-				moveState.initialCoords[drive] = moveState.arcCentre[drive] + moveState.arcRadius * axisScaleFactors[drive] * moveState.currentAngleSine;
+				// Reduce the extrusion by the amount to be skipped
+				for (size_t extruder = 0; extruder < numExtruders; ++extruder)
+				{
+					m.coords[ExtruderToLogicalDrive(extruder)] *= (1.0 - firstSegmentFractionToSkip);
+				}
 			}
-			else if (moveState.doingArcMove && axisMap0.IsBitSet(drive))
+			m.proportionDone = 1.0;
+			if (moveState.doingArcMove)
 			{
-				// Axis0 or a substitute in the selected plane
-				moveState.initialCoords[drive] = moveState.arcCentre[drive] + moveState.arcRadius * axisScaleFactors[drive] * moveState.currentAngleCosine;
+				m.canPauseAfter = true;					// we can pause after the final segment of an arc move
 			}
-			else
-			{
-				// This axis is not moving in an arc
-				const float movementToDo = (moveState.coords[drive] - moveState.initialCoords[drive])/moveState.segmentsLeft;
-				moveState.initialCoords[drive] += movementToDo;
-			}
-			m.coords[drive] = moveState.initialCoords[drive];
+			ClearMove();
 		}
-
-		if (segmentsLeftToStartAt < moveState.segmentsLeft)
+		else
 		{
-			// We are resuming a print part way through a move and we printed this segment already
+			// This move needs to be divided into 2 or more segments
+			// Do the axes
+			AxesBitmap axisMap0, axisMap1;
+			if (moveState.doingArcMove)
+			{
+				moveState.arcCurrentAngle += moveState.arcAngleIncrement;
+				if (moveState.segmentsTillNextFullCalc == 0)
+				{
+					// Do the full calculation
+					moveState.segmentsTillNextFullCalc = SegmentsPerFulArcCalculation;
+					moveState.currentAngleCosine = cosf(moveState.arcCurrentAngle);
+					moveState.currentAngleSine = sinf(moveState.arcCurrentAngle);
+				}
+				else
+				{
+					// Speed up the computation by doing two multiplications and an addition or subtraction instead of a sine or cosine
+					--moveState.segmentsTillNextFullCalc;
+					const float newCosine = moveState.currentAngleCosine * moveState.angleIncrementCosine - moveState.currentAngleSine   * moveState.angleIncrementSine;
+					const float newSine   = moveState.currentAngleSine   * moveState.angleIncrementCosine + moveState.currentAngleCosine * moveState.angleIncrementSine;
+					moveState.currentAngleCosine = newCosine;
+					moveState.currentAngleSine = newSine;
+				}
+				axisMap0 = Tool::GetAxisMapping(moveState.tool, moveState.arcAxis0);
+				axisMap1 = Tool::GetAxisMapping(moveState.tool, moveState.arcAxis1);
+				moveState.cosXyAngle = (moveState.xyPlane) ? moveState.angleIncrementCosine : 1.0;
+			}
+
+			for (size_t drive = 0; drive < numVisibleAxes; ++drive)
+			{
+				if (moveState.doingArcMove && axisMap1.IsBitSet(drive))
+				{
+					// Axis1 or a substitute in the selected plane
+					moveState.initialCoords[drive] = moveState.arcCentre[drive] + moveState.arcRadius * axisScaleFactors[drive] * moveState.currentAngleSine;
+				}
+				else if (moveState.doingArcMove && axisMap0.IsBitSet(drive))
+				{
+					// Axis0 or a substitute in the selected plane
+					moveState.initialCoords[drive] = moveState.arcCentre[drive] + moveState.arcRadius * axisScaleFactors[drive] * moveState.currentAngleCosine;
+				}
+				else
+				{
+					// This axis is not moving in an arc
+					const float movementToDo = (moveState.coords[drive] - moveState.initialCoords[drive])/moveState.segmentsLeft;
+					moveState.initialCoords[drive] += movementToDo;
+				}
+				m.coords[drive] = moveState.initialCoords[drive];
+			}
+
+			if (segmentsLeftToStartAt < moveState.segmentsLeft)
+			{
+				// We are resuming a print part way through a move and we printed this segment already
+				--moveState.segmentsLeft;
+				continue;
+			}
+
+			// Limit the end position at each segment. This is needed for arc moves on any printer, and for [segmented] straight moves on SCARA printers.
+			if (reprap.GetMove().GetKinematics().LimitPosition(m.coords, nullptr, numVisibleAxes, axesVirtuallyHomed, true, limitAxes) != LimitPositionResult::ok)
+			{
+				moveState.segMoveState = SegmentedMoveState::aborted;
+				moveState.doingArcMove = false;
+				moveState.segmentsLeft = 0;
+				return false;
+			}
+
+			if (segmentsLeftToStartAt == moveState.segmentsLeft && firstSegmentFractionToSkip != 0.0)	// if this is the segment we are starting at and we need to skip some of it
+			{
+				// Reduce the extrusion by the amount to be skipped
+				for (size_t extruder = 0; extruder < numExtruders; ++extruder)
+				{
+					m.coords[ExtruderToLogicalDrive(extruder)] *= (1.0 - firstSegmentFractionToSkip);
+				}
+			}
 			--moveState.segmentsLeft;
-			return false;
+
+			m.proportionDone = moveState.GetProportionDone();
 		}
 
-		// Limit the end position at each segment. This is needed for arc moves on any printer, and for [segmented] straight moves on SCARA printers.
-		if (reprap.GetMove().GetKinematics().LimitPosition(m.coords, nullptr, numVisibleAxes, axesVirtuallyHomed, true, limitAxes) != LimitPositionResult::ok)
-		{
-			moveState.segMoveState = SegmentedMoveState::aborted;
-			moveState.doingArcMove = false;
-			moveState.segmentsLeft = 0;
-			return false;
-		}
-
-		if (segmentsLeftToStartAt == moveState.segmentsLeft && firstSegmentFractionToSkip != 0.0)	// if this is the segment we are starting at and we need to skip some of it
-		{
-			// Reduce the extrusion by the amount to be skipped
-			for (size_t extruder = 0; extruder < numExtruders; ++extruder)
-			{
-				m.coords[ExtruderToLogicalDrive(extruder)] *= (1.0 - firstSegmentFractionToSkip);
-			}
-		}
-		--moveState.segmentsLeft;
-
-		m.proportionDone = moveState.GetProportionDone();
+		return true;
 	}
-
-	return true;
 }
 
 void GCodes::ClearMove() noexcept
@@ -3133,7 +3078,7 @@ void GCodes::GetCurrentCoordinates(const StringRef& s) const noexcept
 	for (size_t axis = 0; axis < numVisibleAxes; ++axis)
 	{
 		// Don't put a space after the colon in the response, it confuses Pronterface
-		s.catf("%c:%.3f ", axisLetters[axis], HideNan(GetUserCoordinate(axis)));
+		s.catf("%c:%.3f ", axisLetters[axis], (double)HideNan(GetUserCoordinate(axis)));
 	}
 
 	// Now the virtual extruder position, for Octoprint
@@ -3159,7 +3104,7 @@ void GCodes::GetCurrentCoordinates(const StringRef& s) const noexcept
 	ToolOffsetTransform(moveState.currentUserPosition, machineCoordinates);
 	for (size_t axis = 0; axis < numVisibleAxes; ++axis)
 	{
-		s.catf(" %.3f", HideNan(machineCoordinates[axis]));
+		s.catf(" %.3f", (double)HideNan(machineCoordinates[axis]));
 	}
 
 	// Add the bed compensation
@@ -3173,7 +3118,7 @@ void GCodes::GetCurrentCoordinates(const StringRef& s) const noexcept
 // If successful return true, else write an error message to reply and return false
 bool GCodes::QueueFileToPrint(const char* fileName, const StringRef& reply) noexcept
 {
-	FileStore * const f = platform.OpenFile(platform.GetGCodeDir(), fileName, OpenMode::read);
+	FileStore * const f = platform.OpenFile(Platform::GetGCodeDir(), fileName, OpenMode::read);
 	if (f != nullptr)
 	{
 		fileToPrint.Set(f);
@@ -3188,7 +3133,9 @@ bool GCodes::QueueFileToPrint(const char* fileName, const StringRef& reply) noex
 // Start printing the file already selected. We must hold the movement lock and wait for all moves to finish before calling this, because of the call to ResetMoveCounters.
 void GCodes::StartPrinting(bool fromStart) noexcept
 {
+#if HAS_MASS_STORAGE || HAS_SBC_INTERFACE || HAS_EMBEDDED_FILES
 	fileOffsetToPrint = 0;
+#endif
 	restartMoveFractionDone = 0.0;
 
 	buildObjects.Init();
@@ -3280,10 +3227,10 @@ GCodeResult GCodes::DoDwell(GCodeBuffer& gb) THROWS(GCodeException)
 // Get the tool specified by the P parameter, or the current tool if no P parameter
 ReadLockedPointer<Tool> GCodes::GetSpecifiedOrCurrentTool(GCodeBuffer& gb) THROWS(GCodeException)
 {
-	unsigned int tNumber;
+	int tNumber;
 	if (gb.Seen('P'))
 	{
-		tNumber = gb.GetUIValue();
+		tNumber = (int)gb.GetUIValue();
 	}
 	else
 	{
@@ -3388,11 +3335,11 @@ GCodeResult GCodes::SetOrReportOffsets(GCodeBuffer &gb, const StringRef& reply, 
 				break;
 
 			case 1:			// turn heaters to standby, except any that are used by a different active tool
-				tool->HeatersToStandby();
+				tool->HeatersToActiveOrStandby(false);
 				break;
 
 			case 2:			// set heaters to their active temperatures, except any that are used by a different active tool
-				tool->HeatersToActive();
+				tool->HeatersToActiveOrStandby(true);
 				break;
 			}
 		}
@@ -3679,9 +3626,18 @@ void GCodes::HandleReplyPreserveResult(GCodeBuffer& gb, GCodeResult rslt, const 
 	}
 #endif
 
-	// Don't report empty responses if a file or macro is being processed, or if the GCode was queued
-	// Also check that this response was triggered by a gcode
-	if (reply[0] == 0 && (&gb == fileGCode || &gb == queuedGCode || &gb == triggerGCode || &gb == autoPauseGCode || &gb == daemonGCode || gb.IsDoingFileMacro()))
+	// Don't report empty responses if a file or macro is being processed, or if the GCode was queued, or to PanelDue
+	if (   reply[0] == 0
+		&& (   &gb == fileGCode || &gb == queuedGCode || &gb == triggerGCode || &gb == autoPauseGCode || &gb == daemonGCode
+#if HAS_AUX_DEVICES
+			|| (&gb == auxGCode && !platform.IsAuxRaw(0))
+# ifdef SERIAL_AUX2_DEVICE
+			|| (&gb == aux2GCode && !platform.IsAuxRaw(1))
+# endif
+#endif
+			|| gb.IsDoingFileMacro()
+		   )
+	   )
 	{
 		return;
 	}
@@ -3695,8 +3651,7 @@ void GCodes::HandleReplyPreserveResult(GCodeBuffer& gb, GCodeResult rslt, const 
 	{
 	case Compatibility::Default:
 	case Compatibility::RepRapFirmware:
-		// In RepRapFirmware compatibility mode we suppress empty responses in most cases.
-		// However, DWC expects a reply from every code, so we must even send empty responses
+		// DWC expects a reply from every code, so we must even send empty responses
 		if (reply[0] != 0 || gb.IsLastCommand() || &gb == httpGCode)
 		{
 			platform.MessageF(mt, "%s\n", reply);
@@ -3737,7 +3692,7 @@ void GCodes::HandleReplyPreserveResult(GCodeBuffer& gb, GCodeResult rslt, const 
 	case Compatibility::Sprinter:
 	case Compatibility::Repetier:
 	default:
-		platform.MessageF(mt, "Emulation of %s is not yet supported.\n", gb.LatestMachineState().compatibility.ToString());
+		platform.MessageF(mt, "Emulation of %s is not supported\n", gb.LatestMachineState().compatibility.ToString());
 		break;
 	}
 }
@@ -3783,36 +3738,41 @@ void GCodes::HandleReply(GCodeBuffer& gb, OutputBuffer *reply) noexcept
 
 	case Compatibility::Marlin:
 	case Compatibility::NanoDLP:
-		if (gb.GetCommandLetter() =='M' && gb.GetCommandNumber() == 20)
+		if (gb.GetCommandLetter() == 'M')
 		{
-			platform.Message(type, "Begin file list\n");
-			platform.Message(type, reply);
-			platform.MessageF(type, "End file list\n%s\n", response);
-			return;
+			// The response to some M-codes is handled differently in Marlin mode
+			if (   gb.GetCommandNumber() == 20											// M20 in Marlin mode adds text around the file list
+				&& ((*reply)[0] != '{' || (*reply)[1] != '"')							// ...but don't if it looks like a JSON response
+			   )
+			{
+				platform.Message(type, "Begin file list\n");
+				platform.Message(type, reply);
+				platform.MessageF(type, "End file list\n%s\n", response);
+				return;
+			}
+
+			if (gb.GetCommandNumber() == 28)
+			{
+				platform.MessageF(type, "%s\n", response);
+				platform.Message(type, reply);
+				return;
+			}
+
+			if (gb.GetCommandNumber() == 105 || gb.GetCommandNumber() == 998)
+			{
+				platform.MessageF(type, "%s ", response);
+				platform.Message(type, reply);
+				return;
+			}
 		}
 
-		if (gb.GetCommandLetter() == 'M' && gb.GetCommandNumber() == 28)
-		{
-			platform.MessageF(type, "%s\n", response);
-			platform.Message(type, reply);
-			return;
-		}
-
-		if (gb.GetCommandLetter() =='M' && (gb.GetCommandNumber() == 105 || gb.GetCommandNumber() == 998))
-		{
-			platform.MessageF(type, "%s ", response);
-			platform.Message(type, reply);
-			return;
-		}
-
-		if (reply->Length() != 0 && !gb.IsDoingFileMacro())
+		if (reply->Length() != 0)
 		{
 			platform.Message(type, reply);
-			platform.MessageF(type, "\n%s\n", response);
-		}
-		else if (reply->Length() != 0)
-		{
-			platform.Message(type, reply);
+			if (!gb.IsDoingFileMacro())
+			{
+				platform.MessageF(type, "\n%s\n", response);
+			}
 		}
 		else
 		{
@@ -3825,7 +3785,7 @@ void GCodes::HandleReply(GCodeBuffer& gb, OutputBuffer *reply) noexcept
 	case Compatibility::Sprinter:
 	case Compatibility::Repetier:
 	default:
-		platform.MessageF(type, "Emulation of %s is not yet supported.\n", gb.LatestMachineState().compatibility.ToString());
+		platform.MessageF(type, "Emulation of %s is not supported\n", gb.LatestMachineState().compatibility.ToString());
 		break;
 	}
 
@@ -4033,7 +3993,7 @@ void GCodes::StopPrint(StopPrintReason reason) noexcept
 #if HAS_SBC_INTERFACE
 	if (reprap.UsingSbcInterface())
 	{
-		fileGCode->LatestMachineState().CloseFile();
+		fileGCode->ClosePrintFile();
 		fileGCode->Init();
 	}
 	else
@@ -4596,7 +4556,7 @@ void GCodes::CheckReportDue(GCodeBuffer& gb, const StringRef& reply) const noexc
 			// Send a standard status response for PanelDue
 			OutputBuffer * const statusBuf =
 									(lastAuxStatusReportType == ObjectModelAuxStatusReportType)		// PanelDueFirmware v3.2 or later, using M409 to retrieve object model
-										? reprap.GetModelResponse("", "d99fi")
+										? reprap.GetModelResponse(&gb, "", "d99fi")
 										: GenerateJsonStatusResponse(lastAuxStatusReportType, -1, ResponseSource::AUX);		// older PanelDueFirmware using M408
 			if (statusBuf != nullptr)
 			{
@@ -4688,17 +4648,9 @@ void GCodes::GrabResource(const GCodeBuffer& gb, Resource r) noexcept
 
 	if (resourceOwners[r] != &gb)
 	{
-		if (resourceOwners[r] != nullptr)
-		{
-			GCodeMachineState *m = &(resourceOwners[r]->LatestMachineState());
-			do
-			{
-				m->lockedResources.ClearBit(r);
-				m = m->GetPrevious();
-			}
-			while (m != nullptr);
-		}
+		// Note, we now leave the resource bit set in the original owning GCodeBuffer machine state
 		resourceOwners[r] = &gb;
+		gb.LatestMachineState().lockedResources.SetBit(r);
 	}
 }
 
@@ -4733,12 +4685,8 @@ void GCodes::UnlockResource(const GCodeBuffer& gb, Resource r) noexcept
 
 	if (resourceOwners[r] == &gb)
 	{
-		GCodeMachineState * mc = &gb.LatestMachineState();
-		do
-		{
-			mc->lockedResources.ClearBit(r);
-			mc = mc->GetPrevious();
-		} while (mc != nullptr);
+		// Note, we leave the bit set in previous stack levels! This is needed e.g. to allow M291 blocking messages to be used in homing files.
+		gb.LatestMachineState().lockedResources.ClearBit(r);
 		resourceOwners[r] = nullptr;
 	}
 }
@@ -4852,7 +4800,7 @@ GCodeResult GCodes::StartSDTiming(GCodeBuffer& gb, const StringRef& reply) noexc
 	const float bytesReq = (gb.Seen('S')) ? gb.GetFValue() : 10.0;
 	const bool useCrc = (gb.Seen('C') && gb.GetUIValue() != 0);
 	timingBytesRequested = (uint32_t)(bytesReq * (float)(1024 * 1024));
-	FileStore * const f = platform.OpenFile(platform.GetGCodeDir(), TimingFileName, (useCrc) ? OpenMode::writeWithCrc : OpenMode::write, timingBytesRequested);
+	FileStore * const f = platform.OpenFile(Platform::GetGCodeDir(), TimingFileName, (useCrc) ? OpenMode::writeWithCrc : OpenMode::write, timingBytesRequested);
 	if (f == nullptr)
 	{
 		reply.copy("Failed to create file");
@@ -4946,11 +4894,21 @@ void GCodes::SetItemActiveTemperature(unsigned int itemNumber, float temp) noexc
 		if (tool.IsNotNull())
 		{
 			tool->SetToolHeaterActiveTemperature(0, temp);
+			if (tool->Number() == reprap.GetCurrentToolNumber() && temp > NEARLY_ABS_ZERO)
+			{
+				tool->HeatersToActiveOrStandby(true);				// if it's the current tool then make sure it is active
+			}
 		}
 	}
 	else
 	{
-		reprap.GetHeat().SetActiveTemperature(GetHeaterNumber(itemNumber), temp);
+		const int heaterNumber = GetHeaterNumber(itemNumber);
+		reprap.GetHeat().SetActiveTemperature(heaterNumber, temp);
+		if (temp > NEARLY_ABS_ZERO)
+		{
+			String<1> dummy;
+			reprap.GetHeat().SetActiveOrStandby(heaterNumber, nullptr, true, dummy.GetRef());
+		}
 	}
 }
 

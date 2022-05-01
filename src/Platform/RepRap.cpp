@@ -238,7 +238,7 @@ constexpr ObjectModelArrayDescriptor RepRap::volumesArrayDescriptor =
 constexpr ObjectModelArrayDescriptor RepRap::volChangesArrayDescriptor =
 {
 	nullptr,
-	[] (const ObjectModel *self, const ObjectExplorationContext&) noexcept -> size_t { return NumSdCards; },
+	[] (const ObjectModel *self, const ObjectExplorationContext&) noexcept -> size_t { return MassStorage::GetNumVolumes(); },
 	[] (const ObjectModel *self, ObjectExplorationContext& context) noexcept -> ExpressionValue
 																		{ return ExpressionValue((int32_t)MassStorage::GetVolumeSeq(context.GetLastIndex())); }
 };
@@ -275,12 +275,12 @@ constexpr ObjectModelTableEntry RepRap::objectModelTable[] =
 #if HAS_MASS_STORAGE || HAS_EMBEDDED_FILES || HAS_SBC_INTERFACE
 	{ "filaments",				OBJECT_MODEL_FUNC_NOSELF(FILAMENTS_DIRECTORY),							ObjectModelEntryFlags::verbose },
 	{ "firmware",				OBJECT_MODEL_FUNC_NOSELF(FIRMWARE_DIRECTORY),							ObjectModelEntryFlags::verbose },
-	{ "gCodes",					OBJECT_MODEL_FUNC(self->platform->GetGCodeDir()),						ObjectModelEntryFlags::verbose },
-	{ "macros",					OBJECT_MODEL_FUNC(self->platform->GetMacroDir()),						ObjectModelEntryFlags::verbose },
+	{ "gCodes",					OBJECT_MODEL_FUNC_NOSELF(Platform::GetGCodeDir()),						ObjectModelEntryFlags::verbose },
+	{ "macros",					OBJECT_MODEL_FUNC_NOSELF(Platform::GetMacroDir()),						ObjectModelEntryFlags::verbose },
 	{ "menu",					OBJECT_MODEL_FUNC_NOSELF(MENU_DIR),										ObjectModelEntryFlags::verbose },
 	{ "scans",					OBJECT_MODEL_FUNC_NOSELF(SCANS_DIRECTORY),								ObjectModelEntryFlags::verbose },
 	{ "system",					OBJECT_MODEL_FUNC_NOSELF(ExpressionValue::SpecialType::sysDir, 0),		ObjectModelEntryFlags::none },
-	{ "web",					OBJECT_MODEL_FUNC(self->platform->GetWebDir()),							ObjectModelEntryFlags::verbose },
+	{ "web",					OBJECT_MODEL_FUNC_NOSELF(Platform::GetWebDir()),						ObjectModelEntryFlags::verbose },
 #endif
 
 	// 2. MachineModel.limits
@@ -314,7 +314,7 @@ constexpr ObjectModelTableEntry RepRap::objectModelTable[] =
 	{ "trackedObjects",			OBJECT_MODEL_FUNC_NOSELF((int32_t)MaxTrackedObjects),					ObjectModelEntryFlags::verbose },
 	{ "triggers",				OBJECT_MODEL_FUNC_NOSELF((int32_t)MaxTriggers),							ObjectModelEntryFlags::verbose },
 #if HAS_MASS_STORAGE
-	{ "volumes",				OBJECT_MODEL_FUNC_NOSELF((int32_t)NumSdCards),							ObjectModelEntryFlags::verbose },
+	{ "volumes",				OBJECT_MODEL_FUNC_NOSELF((int32_t)MassStorage::GetNumVolumes()),		ObjectModelEntryFlags::verbose },
 #else
 	{ "volumes",				OBJECT_MODEL_FUNC_NOSELF((int32_t)0),									ObjectModelEntryFlags::verbose },
 #endif
@@ -327,6 +327,7 @@ constexpr ObjectModelTableEntry RepRap::objectModelTable[] =
 	{ "atxPowerPort",			OBJECT_MODEL_FUNC_IF(self->platform->IsAtxPowerControlled(), self->platform->GetAtxPowerPort()),	ObjectModelEntryFlags::none },
 	{ "beep",					OBJECT_MODEL_FUNC_IF(self->beepDuration != 0, self, 4),					ObjectModelEntryFlags::none },
 	{ "currentTool",			OBJECT_MODEL_FUNC((int32_t)self->GetCurrentToolNumber()),				ObjectModelEntryFlags::live },
+	{ "deferredPowerDown",		OBJECT_MODEL_FUNC_IF(self->platform->IsAtxPowerControlled(), self->platform->IsDeferredPowerDown()),	ObjectModelEntryFlags::none },
 	{ "displayMessage",			OBJECT_MODEL_FUNC(self->message.c_str()),								ObjectModelEntryFlags::none },
 	{ "gpOut",					OBJECT_MODEL_FUNC_NOSELF(&gpoutArrayDescriptor),						ObjectModelEntryFlags::live },
 #if SUPPORT_LASER
@@ -350,6 +351,7 @@ constexpr ObjectModelTableEntry RepRap::objectModelTable[] =
 	{ "previousTool",			OBJECT_MODEL_FUNC((int32_t)self->previousToolNumber),					ObjectModelEntryFlags::live },
 	{ "restorePoints",			OBJECT_MODEL_FUNC_NOSELF(&restorePointsArrayDescriptor),				ObjectModelEntryFlags::none },
 	{ "status",					OBJECT_MODEL_FUNC(self->GetStatusString()),								ObjectModelEntryFlags::live },
+	{ "thisInput",				OBJECT_MODEL_FUNC_IF_NOSELF(context.GetGCodeBuffer() != nullptr, (int32_t)context.GetGCodeBuffer()->GetChannel().ToBaseType()),	ObjectModelEntryFlags::verbose },
 	{ "time",					OBJECT_MODEL_FUNC(DateTime(self->platform->GetDateTime())),				ObjectModelEntryFlags::live },
 	{ "upTime",					OBJECT_MODEL_FUNC_NOSELF((int32_t)((context.GetStartMillis()/1000u) & 0x7FFFFFFF)),	ObjectModelEntryFlags::live },
 
@@ -405,7 +407,7 @@ constexpr uint8_t RepRap::objectModelTableDescriptor[] =
 	0,																						// directories
 #endif
 	25,																						// limits
-	18 + HAS_VOLTAGE_MONITOR + SUPPORT_LASER,												// state
+	20 + HAS_VOLTAGE_MONITOR + SUPPORT_LASER,												// state
 	2,																						// state.beep
 	6,																						// state.messageBox
 	12 + HAS_NETWORKING + SUPPORT_SCANNER +
@@ -1100,18 +1102,15 @@ void RepRap::DeleteTool(int toolNumber) noexcept
 void RepRap::SelectTool(int toolNumber, bool simulating) noexcept
 {
 	ReadLockedPointer<Tool> const newTool = GetTool(toolNumber);
-	if (!simulating)
+	if (!simulating && currentTool != nullptr && currentTool != newTool.Ptr())
 	{
-		if (currentTool != nullptr && currentTool != newTool.Ptr())
-		{
-			currentTool->Standby();
-		}
-		if (newTool.IsNotNull())
-		{
-			newTool->Activate();
-		}
+		currentTool->Standby();
 	}
-	currentTool = newTool.Ptr();
+	currentTool = newTool.Ptr();					// must do this first so that Activate() will always work
+	if (!simulating && newTool.IsNotNull())
+	{
+		newTool->Activate();
+	}
 }
 
 void RepRap::PrintTool(int toolNumber, const StringRef& reply) const noexcept
@@ -1378,7 +1377,7 @@ OutputBuffer *RepRap::GetStatusResponse(uint8_t type, ResponseSource source) con
 	AppendFloatArray(response, "extr", GetExtrudersInUse(), [this](size_t extruder) noexcept { return move->LiveCoordinate(ExtruderToLogicalDrive(extruder), currentTool); }, 1);
 
 	// Current speeds
-	response->catf("},\"speeds\":{\"requested\":%.1f,\"top\":%.1f}", (double)InverseConvertSpeedToMmPerSec(move->GetRequestedSpeed()), (double)InverseConvertSpeedToMmPerSec(move->GetTopSpeed()));
+	response->catf("},\"speeds\":{\"requested\":%.1f,\"top\":%.1f}", (double)move->GetRequestedSpeedMmPerSec(), (double)move->GetTopSpeedMmPerSec());
 
 	// Current tool number
 	response->catf(",\"currentTool\":%d", GetCurrentToolNumber());
@@ -1583,7 +1582,7 @@ OutputBuffer *RepRap::GetStatusResponse(uint8_t type, ResponseSource source) con
 				first = false;
 				float temp;
 				(void)sensor->GetLatestTemperature(temp);
-				response->catf("{\"name\":\"%.s\",\"temp\":%.1f}", nm, HideNan(temp));
+				response->catf("{\"name\":\"%.s\",\"temp\":%.1f}", nm, (double)HideNan(temp));
 			}
 			nextSensorNumber = sensor->GetSensorNumber() + 1;
 		}
@@ -1687,14 +1686,14 @@ OutputBuffer *RepRap::GetStatusResponse(uint8_t type, ResponseSource source) con
 #if HAS_MASS_STORAGE
 		// Total and mounted volumes
 		size_t mountedCards = 0;
-		for (size_t i = 0; i < NumSdCards; i++)
+		for (size_t i = 0; i < MassStorage::GetNumVolumes(); i++)
 		{
 			if (MassStorage::IsDriveMounted(i))
 			{
-				mountedCards |= (1 << i);
+				mountedCards |= (1u << i);
 			}
 		}
-		response->catf(",\"volumes\":%u,\"mountedVolumes\":%u", NumSdCards, mountedCards);
+		response->catf(",\"volumes\":%u,\"mountedVolumes\":%u", MassStorage::GetNumVolumes(), mountedCards);
 #endif
 
 		// Machine mode and name
@@ -2078,7 +2077,13 @@ OutputBuffer *RepRap::GetLegacyStatusResponse(uint8_t type, int seq) const noexc
 	{
 		// Add the static fields
 		response->catf(",\"geometry\":\"%s\",\"axes\":%u,\"totalAxes\":%u,\"axisNames\":\"%s\",\"volumes\":%u,\"numTools\":%u,\"myName\":\"%.s\",\"firmwareName\":\"%.s\"",
-						move->GetGeometryString(), numVisibleAxes, gCodes->GetTotalAxes(), gCodes->GetAxisLetters(), NumSdCards, GetNumberOfContiguousTools(), myName.c_str(), FIRMWARE_NAME);
+						move->GetGeometryString(), numVisibleAxes, gCodes->GetTotalAxes(), gCodes->GetAxisLetters(),
+#if HAS_MASS_STORAGE || HAS_EMBEDDED_FILES
+							MassStorage::GetNumVolumes(),
+#else
+							0,
+#endif
+								GetNumberOfContiguousTools(), myName.c_str(), FIRMWARE_NAME);
 	}
 
 	response->cat("}\n");			// include a newline to help PanelDue resync
@@ -2262,6 +2267,116 @@ OutputBuffer *RepRap::GetFilelistResponse(const char *dir, unsigned int startAt)
 
 #endif
 
+#if HAS_MASS_STORAGE
+
+// Get thumbnail data
+// 'offset' is the offset into the file of the thumbnail data that the caller wants.
+// It is up to the caller to get the offset right, however we must fail gracefully if the caller passes us a bad offset.
+// The offset should always be either the initial offset or the 'next' value passed in a previous call, so it should always be the start of a line.
+// 'encapsulateThumbnail' defines whether the thumbnail shall be encapsulated as a "thumbnail" property of the root object
+OutputBuffer *RepRap::GetThumbnailResponse(const char *filename, FilePosition offset, bool forM31point1) noexcept
+{
+	constexpr unsigned int ThumbnailMaxDataSizeM31 = 1024;			// small enough for PanelDue to buffer
+	constexpr unsigned int ThumbnailMaxDataSizeRr = 2600;			// about two TCP messages
+	static_assert(ThumbnailMaxDataSizeM31 % 4 == 0, "must be a multiple of to guarantee base64 alignment");
+	static_assert(ThumbnailMaxDataSizeRr % 4 == 0, "must be a multiple of to guarantee base64 alignment");
+
+	// Need something to write to...
+	OutputBuffer *response;
+	if (!OutputBuffer::Allocate(response))
+	{
+		return nullptr;
+	}
+
+	if (forM31point1)
+	{
+		response->cat("{\"thumbnail\":");
+	}
+	response->catf("{\"fileName\":\"%.s\",\"offset\":%" PRIu32 ",", filename, offset);
+
+	FileStore *const f = platform->OpenFile(Platform::GetGCodeDir(), filename, OpenMode::read);
+	unsigned int err = 0;
+	if (f != nullptr)
+	{
+		if (f->Seek(offset))
+		{
+			response->cat("\"data\":\"");
+
+			const unsigned int thumbnailMaxDataSize = (forM31point1) ? ThumbnailMaxDataSizeM31 : ThumbnailMaxDataSizeRr;
+			for (unsigned int charsWrittenThisCall = 0; charsWrittenThisCall < thumbnailMaxDataSize; )
+			{
+				// Read a line
+				char lineBuffer[MaxGCodeLength];
+				const int charsRead = f->ReadLine(lineBuffer, sizeof(lineBuffer));
+				if (charsRead <= 0)
+				{
+					err = 1;
+					offset = 0;
+					break;
+				}
+
+				const FilePosition posOld = offset;
+				offset = f->Position();
+
+				const char *p = lineBuffer;
+
+				// Skip white spaces
+				while ((p - lineBuffer <= charsRead) && (*p == ';' || *p == ' ' || *p == '\t'))
+				{
+					++p;
+				}
+
+				// Skip empty lines (there shouldn't be any, but just in case there are)
+				if (*p == '\n' || *p == '\0')
+				{
+					continue;
+				}
+
+				// Check for end of thumbnail. We'd like to use a regex here but we can't afford the flash space of a regex parser in some build configurations.
+				if (   StringStartsWith(p, "thumbnail end") || StringStartsWith(p, "thumbnail_QOI end") || StringStartsWith(p, "thumbnail_JPG end")
+					// Also stop if the base64 data has ended, to avoid sending to the end of file if the end marker is missing. We don't want to take too long so just look for space.
+					|| strchr(p, ' ') != nullptr
+				   )
+				{
+					offset = 0;
+					break;
+				}
+
+				const unsigned int charsSkipped = p - lineBuffer;
+				const unsigned int charsAvailable = charsRead - charsSkipped;
+				unsigned int charsWrittenFromThisLine;
+				if (charsAvailable <= thumbnailMaxDataSize - charsWrittenThisCall)
+				{
+					// Write all the data in this line
+					charsWrittenFromThisLine = charsAvailable;
+				}
+				else
+				{
+					// Write just enough characters to fill the buffer
+					charsWrittenFromThisLine = thumbnailMaxDataSize - charsWrittenThisCall;
+					offset = posOld + charsSkipped + charsWrittenFromThisLine;
+				}
+
+				// Copy the data
+				response->cat(p, charsWrittenFromThisLine);
+				charsWrittenThisCall += charsWrittenFromThisLine;
+			}
+
+			response->catf("\",\"next\":%" PRIu32 ",", offset);
+		}
+		f->Close();
+	}
+	else
+	{
+		err = 1;
+	}
+
+	response->catf(forM31point1 ? "\"err\":%u}}\n" : "\"err\":%u}\n", err);
+	return response;
+}
+
+#endif
+
 // Get information for the specified file, or the currently printing file (if 'filename' is null or empty), in JSON format
 // Return GCodeResult::Warning if the file doesn't exist, else GCodeResult::ok or GCodeResult::notFinished
 GCodeResult RepRap::GetFileInfoResponse(const char *filename, OutputBuffer *&response, bool quitEarly) noexcept
@@ -2273,7 +2388,7 @@ GCodeResult RepRap::GetFileInfoResponse(const char *filename, OutputBuffer *&res
 #if HAS_MASS_STORAGE || HAS_EMBEDDED_FILES
 		// Poll file info for a specific file
 		String<MaxFilenameLength> filePath;
-		if (!MassStorage::CombineName(filePath.GetRef(), platform->GetGCodeDir(), filename))
+		if (!MassStorage::CombineName(filePath.GetRef(), Platform::GetGCodeDir(), filename))
 		{
 			info.isValid = false;
 		}
@@ -2298,7 +2413,7 @@ GCodeResult RepRap::GetFileInfoResponse(const char *filename, OutputBuffer *&res
 
 	if (info.isValid)
 	{
-		response->printf("{\"err\":0,\"size\":%lu,",info.fileSize);
+		response->printf("{\"err\":0,\"fileName\":\"%.s\",\"size\":%lu,", ((specificFile) ? filename : printMonitor->GetPrintingFilename()), info.fileSize);
 		tm timeInfo;
 		gmtime_r(&info.lastModifiedTime, &timeInfo);
 		if (timeInfo.tm_year > /*19*/80)
@@ -2307,7 +2422,7 @@ GCodeResult RepRap::GetFileInfoResponse(const char *filename, OutputBuffer *&res
 					timeInfo.tm_year + 1900, timeInfo.tm_mon + 1, timeInfo.tm_mday, timeInfo.tm_hour, timeInfo.tm_min, timeInfo.tm_sec);
 		}
 
-		response->catf("\"height\":%.2f,\"layerHeight\":%.2f,", (double)info.objectHeight, (double)info.layerHeight);
+		response->catf("\"height\":%.2f,\"layerHeight\":%.2f,\"numLayers\":%u,", (double)info.objectHeight, (double)info.layerHeight, info.numLayers);
 		if (info.printTime != 0)
 		{
 			response->catf("\"printTime\":%" PRIu32 ",", info.printTime);
@@ -2331,11 +2446,27 @@ GCodeResult RepRap::GetFileInfoResponse(const char *filename, OutputBuffer *&res
 				ch = ',';
 			}
 		}
-		response->cat("]");
+		response->cat(']');
 
 		if (!specificFile)
 		{
-			response->catf(",\"printDuration\":%d,\"fileName\":\"%.s\"", (int)printMonitor->GetPrintDuration(), printMonitor->GetPrintingFilename());
+			response->catf(",\"printDuration\":%d", (int)printMonitor->GetPrintDuration());
+		}
+
+		// See if we have any thumbnails
+		if (info.thumbnails[0].IsValid())
+		{
+			response->cat(",\"thumbnails\":");
+			size_t index = 0;
+			do
+			{
+				const GCodeFileInfo::ThumbnailInfo& inf = info.thumbnails[index];
+				response->catf("%c{\"width\":%u,\"height\":%u,\"format\":\"%s\",\"offset\":%" PRIu32 ",\"size\":%" PRIu32 "}",
+								((index == 0) ? '[' : ','), inf.height, inf.width, inf.format.ToString(), inf.offset, inf.size);
+				++index;
+			}
+			while (index < MaxThumbnails && info.thumbnails[index].IsValid());
+			response->cat(']');
 		}
 
 		response->catf(",\"generatedBy\":\"%.s\"}\n", info.generatedBy.c_str());
@@ -2347,7 +2478,7 @@ GCodeResult RepRap::GetFileInfoResponse(const char *filename, OutputBuffer *&res
 }
 
 // Helper functions to write JSON arrays
-// Append float array using 1 decimal place
+// Append float array using the specified number of decimal places
 void RepRap::AppendFloatArray(OutputBuffer *buf, const char *name, size_t numValues, function_ref<float(size_t)> func, unsigned int numDecimalDigits) noexcept
 {
 	if (name != nullptr)
@@ -2361,7 +2492,8 @@ void RepRap::AppendFloatArray(OutputBuffer *buf, const char *name, size_t numVal
 		{
 			buf->cat(',');
 		}
-		buf->catf(GetFloatFormatString(numDecimalDigits), HideNan(func(i)));
+		const float fVal = HideNan(func(i));
+		buf->catf(GetFloatFormatString(fVal, numDecimalDigits), (double)fVal);
 	}
 	buf->cat(']');
 }
@@ -2406,7 +2538,7 @@ void RepRap::AppendStringArray(OutputBuffer *buf, const char *name, size_t numVa
 
 // Return a query into the object model, or return nullptr if no buffer available
 // We append a newline to help PanelDue resync after receiving corrupt or incomplete data. DWC ignores it.
-OutputBuffer *RepRap::GetModelResponse(const char *key, const char *flags) const THROWS(GCodeException)
+OutputBuffer *RepRap::GetModelResponse(const GCodeBuffer *_ecv_null gb, const char *key, const char *flags) const THROWS(GCodeException)
 {
 	OutputBuffer *outBuf;
 	if (OutputBuffer::Allocate(outBuf))
@@ -2424,7 +2556,7 @@ OutputBuffer *RepRap::GetModelResponse(const char *key, const char *flags) const
 
 		try
 		{
-			reprap.ReportAsJson(outBuf, key, flags, wantArrayLength);
+			reprap.ReportAsJson(gb, outBuf, key, flags, wantArrayLength);
 			outBuf->cat("}\n");
 			if (outBuf->HadOverflow())
 			{
@@ -2828,7 +2960,9 @@ void RepRap::PrepareToLoadIap() noexcept
 	// This also shuts down tasks and interrupts that might make use of the RAM that we are about to load the IAP binary into.
 	EmergencyStop();						// this also stops Platform::Tick being called, which is necessary because it access Z probe object in RAM used by IAP
 	network->Exit();						// kill the network task to stop it overwriting RAM that we use to hold the IAP
+#if HAS_SMART_DRIVERS
 	SmartDrivers::Exit();					// stop the drivers being polled via SPI or UART because it may use data in the last 64Kb of RAM
+#endif
 	FilamentMonitor::Exit();				// stop the filament monitors generating interrupts, we may be about to overwrite them
 	fansManager->Exit();					// stop the fan tachos generating interrupts, we may be about to overwrite them
 #if SUPPORT_ACCELEROMETERS

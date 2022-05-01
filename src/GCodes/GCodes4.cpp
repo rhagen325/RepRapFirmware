@@ -9,6 +9,10 @@
 #include <Heating/Heat.h>
 #include <Endstops/ZProbe.h>
 
+#if SUPPORT_CAN_EXPANSION
+# include <CAN/CanMotion.h>
+#endif
+
 #if HAS_SBC_INTERFACE
 # include <SBC/SbcInterface.h>
 #endif
@@ -40,7 +44,11 @@ void GCodes::RunStateMachine(GCodeBuffer& gb, const StringRef& reply) noexcept
 	{
 	case GCodeState::waitingForSpecialMoveToComplete:
 	case GCodeState::abortWhenMovementFinished:
-		if (LockMovementAndWaitForStandstill(gb))		// movement should already be locked, but we need to wait for standstill and fetch the current position
+		if (   LockMovementAndWaitForStandstill(gb)		// movement should already be locked, but we need to wait for standstill and fetch the current position
+#if SUPPORT_CAN_EXPANSION
+			&& CanMotion::FinishedReverting()
+#endif
+		   )
 		{
 			// Check whether we made any G1 S3 moves and need to set the axis limits
 			axesToSenseLength.Iterate([this](unsigned int axis, unsigned int)
@@ -261,6 +269,7 @@ void GCodes::RunStateMachine(GCodeBuffer& gb, const StringRef& reply) noexcept
 		break;
 
 	case GCodeState::homing1:
+		// We should only ever get here when toBeHomed is not empty
 		if (toBeHomed.IsEmpty())
 		{
 			gb.SetState(GCodeState::normal);
@@ -301,7 +310,8 @@ void GCodes::RunStateMachine(GCodeBuffer& gb, const StringRef& reply) noexcept
 			// Test whether the previous homing move homed any axes
 			if (toBeHomed.Disjoint(axesHomed))
 			{
-				reply.copy("Homing failed");
+				reply.copy("Failed to home axes ");
+				AppendAxes(reply, toBeHomed);
 				stateMachineResult = GCodeResult::error;
 				toBeHomed.Clear();
 				gb.SetState(GCodeState::normal);
@@ -397,7 +407,7 @@ void GCodes::RunStateMachine(GCodeBuffer& gb, const StringRef& reply) noexcept
 		break;
 
 	case GCodeState::m109WaitForTemperature:
-		if (cancelWait || IsSimulating() || ToolHeatersAtSetTemperatures(reprap.GetCurrentTool(), gb.LatestMachineState().waitWhileCooling, TEMPERATURE_CLOSE_ENOUGH))
+		if (cancelWait || IsSimulating() || ToolHeatersAtSetTemperatures(reprap.GetCurrentTool(), gb.LatestMachineState().waitWhileCooling, TemperatureCloseEnough))
 		{
 			cancelWait = isWaiting = false;
 			gb.SetState(GCodeState::normal);
@@ -542,19 +552,25 @@ void GCodes::RunStateMachine(GCodeBuffer& gb, const StringRef& reply) noexcept
 				if (firmwareUpdateModuleMap.IsBitSet(module))
 				{
 					firmwareUpdateModuleMap.ClearBit(module);
+# if SUPPORT_PANELDUE_FLASH
 					FirmwareUpdater::UpdateModule(module, serialChannelForPanelDueFlashing, filenameString.GetRef());
-					updating = true;
 					isFlashingPanelDue = (module == FirmwareUpdater::PanelDueFirmwareModule);
+# else
+					FirmwareUpdater::UpdateModule(module, 0, filenameString.GetRef());
+# endif
+					updating = true;
 					break;
 				}
 			}
 			if (!updating)
 			{
+# if SUPPORT_PANELDUE_FLASH
 				isFlashingPanelDue = false;
+# endif
 				gb.SetState(GCodeState::flashing2);
 			}
 		}
-# if HAS_AUX_DEVICES
+# if SUPPORT_PANELDUE_FLASH
 		else
 		{
 			PanelDueUpdater* const panelDueUpdater = platform.GetPanelDueUpdater();
@@ -1408,10 +1424,10 @@ void GCodes::RunStateMachine(GCodeBuffer& gb, const StringRef& reply) noexcept
 				platform.MessageF(gb.GetResponseMessageType(), "SD write speed for %.1fMbyte file was %.2fMbytes/sec\n", (double)fileMbytes, (double)mbPerSec);
 				sdTimingFile->Close();
 
-				sdTimingFile = platform.OpenFile(platform.GetGCodeDir(), TimingFileName, OpenMode::read);
+				sdTimingFile = platform.OpenFile(Platform::GetGCodeDir(), TimingFileName, OpenMode::read);
 				if (sdTimingFile == nullptr)
 				{
-					platform.Delete(platform.GetGCodeDir(), TimingFileName);
+					platform.Delete(Platform::GetGCodeDir(), TimingFileName);
 					gb.LatestMachineState().SetError("Failed to re-open timing file");
 					gb.SetState(GCodeState::normal);
 					break;
@@ -1428,7 +1444,7 @@ void GCodes::RunStateMachine(GCodeBuffer& gb, const StringRef& reply) noexcept
 			if (!sdTimingFile->Write(reply.c_str(), bytesToWrite))
 			{
 				sdTimingFile->Close();
-				platform.Delete(platform.GetGCodeDir(), TimingFileName);
+				platform.Delete(Platform::GetGCodeDir(), TimingFileName);
 				gb.LatestMachineState().SetError("Failed to write to timing file");
 				gb.SetState(GCodeState::normal);
 				break;
@@ -1448,7 +1464,7 @@ void GCodes::RunStateMachine(GCodeBuffer& gb, const StringRef& reply) noexcept
 				const float mbPerSec = (fileMbytes * 1000.0)/(float)ms;
 				sdTimingFile->Close();
 				reply.printf("SD read speed for %.1fMbyte file was %.2fMbytes/sec", (double)fileMbytes, (double)mbPerSec);
-				platform.Delete(platform.GetGCodeDir(), TimingFileName);
+				platform.Delete(Platform::GetGCodeDir(), TimingFileName);
 				gb.SetState(GCodeState::normal);
 				break;
 			}
@@ -1457,7 +1473,7 @@ void GCodes::RunStateMachine(GCodeBuffer& gb, const StringRef& reply) noexcept
 			if (sdTimingFile->Read(reply.Pointer(), bytesToRead) != (int)bytesToRead)
 			{
 				sdTimingFile->Close();
-				platform.Delete(platform.GetGCodeDir(), TimingFileName);
+				platform.Delete(Platform::GetGCodeDir(), TimingFileName);
 				gb.LatestMachineState().SetError("Failed to read from timing file");
 				gb.SetState(GCodeState::normal);
 				break;

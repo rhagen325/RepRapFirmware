@@ -378,7 +378,7 @@ static GCodeResult EutGetInfo(const CanMessageReturnInfo& msg, const StringRef& 
 		extra = LastDiagnosticsPart;
 		StepTimer::Diagnostics(reply);
 		break;
-}
+	}
 	return GCodeResult::ok;
 }
 
@@ -512,6 +512,11 @@ void CommandProcessor::ProcessReceivedMessage(CanMessageBuffer *buf) noexcept
 				rslt = reprap.GetPlatform().EutHandleSetDriverStates(buf->msg.multipleDrivesRequestDriverState, replyRef);
 				break;
 
+			case CanMessageType::m915:
+				requestId = buf->msg.generic.requestId;
+				rslt = reprap.GetPlatform().EutProcessM915(buf->msg.generic, replyRef);
+				break;
+
 			case CanMessageType::setPressureAdvance:
 				requestId = buf->msg.multipleDrivesRequestFloat.requestId;
 				rslt = reprap.GetMove().EutSetRemotePressureAdvance(buf->msg.multipleDrivesRequestFloat, buf->dataLength, replyRef);
@@ -575,30 +580,33 @@ void CommandProcessor::ProcessReceivedMessage(CanMessageBuffer *buf) noexcept
 				rslt = GCodeResult::error;
 			}
 
-			// Re-use the message buffer to send a standard reply
-			const CanAddress srcAddress = buf->id.Src();
-			CanMessageStandardReply *msg = buf->SetupResponseMessage<CanMessageStandardReply>(requestId, CanInterface::GetCanAddress(), srcAddress);
-			msg->resultCode = (uint16_t)rslt;
-			msg->extra = extra;
-			const size_t totalLength = reply.strlen();
-			size_t lengthDone = 0;
-			uint8_t fragmentNumber = 0;
-			for (;;)
+			if (requestId != CanRequestIdNoReplyNeeded)				// if a reply is needed
 			{
-				const size_t fragmentLength = min<size_t>(totalLength - lengthDone, CanMessageStandardReply::MaxTextLength);
-				memcpy(msg->text, reply.c_str() + lengthDone, fragmentLength);
-				lengthDone += fragmentLength;
-				buf->dataLength = msg->GetActualDataLength(fragmentLength);
-				msg->fragmentNumber = fragmentNumber;
-				if (lengthDone == totalLength)
+				// Re-use the message buffer to send a standard reply
+				const CanAddress srcAddress = buf->id.Src();
+				CanMessageStandardReply *msg = buf->SetupResponseMessage<CanMessageStandardReply>(requestId, CanInterface::GetCanAddress(), srcAddress);
+				msg->resultCode = (uint16_t)rslt;
+				msg->extra = extra;
+				const size_t totalLength = reply.strlen();
+				size_t lengthDone = 0;
+				uint8_t fragmentNumber = 0;
+				for (;;)
 				{
-					msg->moreFollows = false;
+					const size_t fragmentLength = min<size_t>(totalLength - lengthDone, CanMessageStandardReply::MaxTextLength);
+					memcpy(msg->text, reply.c_str() + lengthDone, fragmentLength);
+					lengthDone += fragmentLength;
+					buf->dataLength = msg->GetActualDataLength(fragmentLength);
+					msg->fragmentNumber = fragmentNumber;
+					if (lengthDone == totalLength)
+					{
+						msg->moreFollows = false;
+						CanInterface::SendResponseNoFree(buf);
+						break;
+					}
+					msg->moreFollows = true;
 					CanInterface::SendResponseNoFree(buf);
-					break;
+					++fragmentNumber;
 				}
-				msg->moreFollows = true;
-				CanInterface::SendResponseNoFree(buf);
-				++fragmentNumber;
 			}
 		}
 		else

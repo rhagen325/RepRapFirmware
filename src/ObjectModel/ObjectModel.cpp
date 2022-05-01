@@ -193,20 +193,6 @@ void ExpressionValue::Release() noexcept
 	}
 }
 
-// Get the format string to use assuming this is a floating point number
-const char *_ecv_array ExpressionValue::GetFloatFormatString() const noexcept
-{
-	float f = 1.0;
-	unsigned int digitsAfterPoint = param;
-	while (digitsAfterPoint > 1 && fVal > f)
-	{
-		f *= 10.0;
-		--digitsAfterPoint;
-	}
-
-	return ::GetFloatFormatString(digitsAfterPoint);
-}
-
 #if SUPPORT_CAN_EXPANSION
 
 // Given that this is a CanExpansionBoardDetails value, extract the part requested according to the parameter and append it to the string
@@ -227,6 +213,9 @@ void ExpressionValue::ExtractRequestedPart(const StringRef& rslt) const noexcept
 
 		switch((ExpansionDetail)param)
 		{
+		case ExpansionDetail::longName:
+			rslt.cat("Duet 3 Expansion ");
+			// no break
 		case ExpansionDetail::shortName:
 			rslt.catn(sVal, indexOfDivider1);
 			break;
@@ -305,9 +294,9 @@ ObjectModel::ObjectModel() noexcept
 // ObjectExplorationContext members
 
 // Constructor used when reporting the OM as JSON
-ObjectExplorationContext::ObjectExplorationContext(bool wal, const char *reportFlags, unsigned int initialMaxDepth, size_t initialBufferOffset) noexcept
+ObjectExplorationContext::ObjectExplorationContext(const GCodeBuffer *_ecv_null gbp, bool wal, const char *reportFlags, unsigned int initialMaxDepth, size_t initialBufferOffset) noexcept
 	: startMillis(millis()), initialBufOffset(initialBufferOffset), maxDepth(initialMaxDepth), currentDepth(0), startElement(0), nextElement(-1), numIndicesProvided(0), numIndicesCounted(0),
-	  line(-1), column(-1),
+	  line(-1), column(-1), gb(gbp),
 	  shortForm(false), wantArrayLength(wal), wantExists(false),
 	  includeNonLive(true), includeImportant(false), includeNulls(false),
 	  excludeVerbose(true), excludeObsolete(true),
@@ -364,9 +353,9 @@ ObjectExplorationContext::ObjectExplorationContext(bool wal, const char *reportF
 }
 
 // Constructor when evaluating expressions
-ObjectExplorationContext::ObjectExplorationContext(bool wal, bool wex, int p_line, int p_col) noexcept
+ObjectExplorationContext::ObjectExplorationContext(const GCodeBuffer *_ecv_null gbp, bool wal, bool wex, int p_line, int p_col) noexcept
 	: startMillis(millis()), initialBufOffset(0), maxDepth(99), currentDepth(0), startElement(0), nextElement(-1), numIndicesProvided(0), numIndicesCounted(0),
-	  line(p_line), column(p_col),
+	  line(p_line), column(p_col), gb(gbp),
 	  shortForm(false), wantArrayLength(wal), wantExists(wex),
 	  includeNonLive(true), includeImportant(false), includeNulls(false),
 	  excludeVerbose(false), excludeObsolete(false),
@@ -496,10 +485,10 @@ void ObjectModel::ReportAsJson(OutputBuffer* buf, ObjectExplorationContext& cont
 }
 
 // Construct a JSON representation of those parts of the object model requested by the user. This version is called on the root of the tree.
-void ObjectModel::ReportAsJson(OutputBuffer *buf, const char *_ecv_array filter, const char *_ecv_array reportFlags, bool wantArrayLength) const THROWS(GCodeException)
+void ObjectModel::ReportAsJson(const GCodeBuffer *_ecv_null gb, OutputBuffer *buf, const char *_ecv_array filter, const char *_ecv_array reportFlags, bool wantArrayLength) const THROWS(GCodeException)
 {
 	const unsigned int defaultMaxDepth = (wantArrayLength) ? 99 : (filter[0] == 0) ? 1 : 99;
-	ObjectExplorationContext context(wantArrayLength, reportFlags, defaultMaxDepth, buf->Length());
+	ObjectExplorationContext context(gb, wantArrayLength, reportFlags, defaultMaxDepth, buf->Length());
 	ReportAsJson(buf, context, nullptr, 0, filter);
 	if (context.GetNextElement() >= 0)
 	{
@@ -667,13 +656,14 @@ void ObjectModel::ReportItemAsJsonFull(OutputBuffer *buf, ObjectExplorationConte
 			{
 				const char *endptr;
 				const int32_t index = StrToI32(filter, &endptr);
-				if (endptr == filter || *endptr != ']' || index < 0 || (size_t)index >= val.omadVal->GetNumElements(this, context))
+				const auto bm = Bitmap<uint32_t>::MakeFromRaw(val.uVal);
+				int bitNumber;
+				if (endptr == filter || *endptr != ']' || index < 0 || (bitNumber = bm.GetSetBitNumber(index)) < 0)
 				{
 					buf->cat("null");				// avoid returning badly-formed JSON
 					break;							// invalid syntax, or index out of range
 				}
-				const auto bm = Bitmap<uint32_t>::MakeFromRaw(val.uVal);
-				buf->catf("%u", bm.GetSetBitNumber(index));
+				buf->catf("%d", bitNumber);
 				break;
 			}
 		}
@@ -699,13 +689,14 @@ void ObjectModel::ReportItemAsJsonFull(OutputBuffer *buf, ObjectExplorationConte
 			{
 				const char *endptr;
 				const int32_t index = StrToI32(filter, &endptr);
-				if (endptr == filter || *endptr != ']' || index < 0 || (size_t)index >= val.omadVal->GetNumElements(this, context))
+				const auto bm = Bitmap<uint64_t>::MakeFromRaw(val.uVal);
+				int bitNumber;
+				if (endptr == filter || *endptr != ']' || index < 0 || (bitNumber = bm.GetSetBitNumber(index)) < 0)
 				{
 					buf->cat("null");				// avoid returning badly-formed JSON
 					break;							// invalid syntax, or index out of range
 				}
-				const auto bm = Bitmap<uint64_t>::MakeFromRaw(val.uVal);
-				buf->catf("%u", bm.GetSetBitNumber(index));
+				buf->catf("%d", bitNumber);
 				break;
 			}
 		}
@@ -1051,29 +1042,44 @@ decrease(strlen(idString))	// recursion variant
 
 	case TypeCode::Bitmap16:
 	case TypeCode::Bitmap32:
-		if (context.WantArrayLength())
 		{
-			if (*idString != 0)
+			const int numSetBits = Bitmap<uint32_t>::MakeFromRaw(val.uVal).CountSetBits();
+			if (context.WantArrayLength())
 			{
-				break;
+				if (*idString != 0)
+				{
+					break;
+				}
+				return ExpressionValue((int32_t)numSetBits);
 			}
-			const auto bm = Bitmap<uint32_t>::MakeFromRaw(val.uVal);
-			return ExpressionValue((int32_t)bm.CountSetBits());
+
+			if (*idString == '^')
+			{
+				++idString;
+				if (*idString != 0)
+				{
+					break;
+				}
+				context.AddIndex();
+				const bool inBounds = (context.GetLastIndex() >= 0 && context.GetLastIndex() < numSetBits);
+				if (context.WantExists())
+				{
+					return ExpressionValue(inBounds);
+				}
+
+				if (!inBounds)
+				{
+					throw context.ConstructParseException("array index out of bounds");
+				}
+
+				if (context.WantExists())
+				{
+					return ExpressionValue(true);
+				}
+				return ExpressionValue((int32_t)(Bitmap<uint32_t>::MakeFromRaw(val.uVal).GetSetBitNumber(context.GetLastIndex())));
+			}
 		}
-		if (*idString == '^')
-		{
-			++idString;
-			if (*idString != 0)
-			{
-				break;
-			}
-			if (context.WantExists())
-			{
-				return ExpressionValue(true);
-			}
-			const auto bm = Bitmap<uint32_t>::MakeFromRaw(val.uVal);
-			return ExpressionValue((int32_t)bm.GetSetBitNumber(context.GetLastIndex()));
-		}
+
 		if (*idString != 0)
 		{
 			break;
@@ -1085,29 +1091,45 @@ decrease(strlen(idString))	// recursion variant
 		return ExpressionValue((int32_t)val.uVal);
 
 	case TypeCode::Bitmap64:
-		if (context.WantArrayLength())
 		{
-			if (*idString != 0)
+			const int numSetBits = Bitmap<uint64_t>::MakeFromRaw(val.Get56BitValue()).CountSetBits();
+			if (context.WantArrayLength())
 			{
-				break;
+				if (*idString != 0)
+				{
+					break;
+				}
+				return ExpressionValue((int32_t)numSetBits);
 			}
-			const auto bm = Bitmap<uint64_t>::MakeFromRaw(val.Get56BitValue());
-			return ExpressionValue((int32_t)bm.CountSetBits());
+
+			if (*idString == '^')
+			{
+				++idString;
+				if (*idString != 0)
+				{
+					break;
+				}
+				context.AddIndex();
+				const bool inBounds = (context.GetLastIndex() >= 0 && context.GetLastIndex() < numSetBits);
+				if (context.WantExists())
+				{
+					return ExpressionValue(inBounds);
+				}
+
+				if (!inBounds)
+				{
+					throw context.ConstructParseException("array index out of bounds");
+				}
+
+				if (context.WantExists())
+				{
+					return ExpressionValue(true);
+				}
+
+				return ExpressionValue((int32_t)(Bitmap<uint64_t>::MakeFromRaw(val.Get56BitValue()).GetSetBitNumber(context.GetLastIndex())));
+			}
 		}
-		if (*idString == '^')
-		{
-			++idString;
-			if (*idString != 0)
-			{
-				break;
-			}
-			if (context.WantExists())
-			{
-				return ExpressionValue(true);
-			}
-			const auto bm = Bitmap<uint64_t>::MakeFromRaw(val.Get56BitValue());
-			return ExpressionValue((int32_t)bm.GetSetBitNumber(context.GetLastIndex()));
-		}
+
 		if (*idString != 0)
 		{
 			break;
@@ -1125,7 +1147,7 @@ decrease(strlen(idString))	// recursion variant
 		}
 		break;
 
-#ifdef DUET3
+#if SUPPORT_CAN_EXPANSION
 	case TypeCode::CanExpansionBoardDetails:
 		if (*idString == 0)
 		{

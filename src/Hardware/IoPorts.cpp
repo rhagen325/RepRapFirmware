@@ -8,7 +8,6 @@
 #include "IoPorts.h"
 #include <Platform/RepRap.h>
 #include <Platform/Platform.h>
-#include <Configuration.h>
 #include <GCodes/GCodeBuffer/GCodeBuffer.h>
 
 #ifdef DUET_NG
@@ -175,7 +174,7 @@ void IoPort::Release() noexcept
 	hardwareInvert = totalInvert = false;
 }
 
-// Attach an interrupt to the pin. Nor permitted if we allocated the pin in shared input mode.
+// Attach an interrupt to the pin. Not permitted if we allocated the pin in shared input mode.
 bool IoPort::AttachInterrupt(StandardCallbackFunction callback, InterruptMode mode, CallbackParameter param) const noexcept
 {
 	return IsValid() && !isSharedInput && attachInterrupt(GetPinNoCheck(), callback, mode, param);
@@ -394,7 +393,7 @@ void IoPort::ToggleInvert(bool pInvert) noexcept
 	}
 }
 
-void IoPort::AppendDetails(const StringRef& str) const noexcept
+void IoPort::AppendBasicDetails(const StringRef& str) const noexcept
 {
 	if (IsValid())
 	{
@@ -654,9 +653,9 @@ void PwmPort::AppendFrequency(const StringRef& str) const noexcept
 	}
 }
 
-void PwmPort::AppendDetails(const StringRef& str) const noexcept
+void PwmPort::AppendFullDetails(const StringRef& str) const noexcept
 {
-	IoPort::AppendDetails(str);
+	AppendBasicDetails(str);
 	AppendFrequency(str);
 }
 

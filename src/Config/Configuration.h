@@ -168,13 +168,14 @@ constexpr size_t StringLengthLoggedCommand = StringLength100;	// Length of a str
 
 #if SAM4E || SAM4S || SAME70 || SAME5x || defined(ESP_NETWORKING)
 // Increased GCODE_LENGTH on the SAM4 because M587 and M589 commands on the Duet WiFi can get very long and GCode meta commands can get even longer
-constexpr size_t GCODE_LENGTH = 201;					// maximum number of non-comment characters in a line of GCode including the null terminator
+// Also if HAS_SBC_INTERFACE is enabled then it needs to be large enough to hold SBC commands sent in binary mode, see GCodeBuffer.h
+constexpr size_t MaxGCodeLength = 256;					// maximum number of non-comment characters in a line of GCode including the null terminator
 #else
-constexpr size_t GCODE_LENGTH = 101;					// maximum number of non-comment characters in a line of GCode including the null terminator
+constexpr size_t MaxGCodeLength = 101;					// maximum number of non-comment characters in a line of GCode including the null terminator
 #endif
 
 // Define the maximum length of a GCode that we can queue to synchronise it to a move. Long enough for M150 R255 U255 B255 P255 S255 F1 encoded in binary mode (64 bytes).
-constexpr size_t SHORT_GCODE_LENGTH = 64;
+constexpr size_t ShortGCodeLength = 64;
 
 // Output buffer length and number of buffers
 // When using RTOS, it is best if it is possible to fit an HTTP response header in a single buffer. Our headers are currently about 230 bytes long.
@@ -209,6 +210,13 @@ constexpr size_t ObjectNamesStringSpace = 1000;			// How much space we reserve f
 #else
 constexpr size_t MaxTrackedObjects = 20;				// How many build plate objects we track. Each one needs 16 bytes of storage, in addition to the string space.
 constexpr size_t ObjectNamesStringSpace = 500;			// How much space we reserve for the names of objects on the build plate
+#endif
+
+// How many filaments we can return in the file information. Each one uses 4 bytes of statically-allocated RAM.
+#if SAME70 || SAME5x
+constexpr unsigned int MaxFilaments = 20;
+#else
+constexpr unsigned int MaxFilaments = 8;
 #endif
 
 // Move system
@@ -268,6 +276,8 @@ constexpr size_t MAX_FILES = 10;						// Must be large enough to handle the max 
 #endif
 
 constexpr size_t FILE_BUFFER_SIZE = 128;
+
+constexpr size_t MaxThumbnails = 4;						// Maximum number of thumbnail images read from the job file that we store and report
 
 // Webserver stuff
 #define DEFAULT_PASSWORD		"reprap"				// Default machine password

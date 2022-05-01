@@ -434,11 +434,11 @@ void ValueMenuItem::Draw(Lcd& lcd, PixelNumber rightMargin, bool highlight, Pixe
 					break;
 
 				case 38:	// requested speed
-					currentValue.f = reprap.GetMove().GetRequestedSpeed();
+					currentValue.f = reprap.GetMove().GetRequestedSpeedMmPerSec();
 					break;
 
 				case 39:	// top speed
-					currentValue.f = reprap.GetMove().GetTopSpeed();
+					currentValue.f = reprap.GetMove().GetTopSpeedMmPerSec();
 					break;
 
 				default:
@@ -533,22 +533,11 @@ bool ValueMenuItem::Adjust_SelectHelper() noexcept
 		switch (valIndex/100)
 		{
 		case 1: // heater active temperature
-			if (1.0 > currentValue.f) // 0 is off
-			{
-				reprap.GetGCodes().SetItemActiveTemperature(itemNumber, -273.15);
-			}
-			else // otherwise ensure the tool is made active at the same time (really only matters for 79)
-			{
-				if (80 > itemNumber)
-				{
-					reprap.SelectTool(itemNumber, false);
-				}
-				reprap.GetGCodes().SetItemActiveTemperature(itemNumber, currentValue.f);
-			}
+			reprap.GetGCodes().SetItemActiveTemperature(itemNumber, (currentValue.f < 1.0) ? ABS_ZERO : currentValue.f);
 			break;
 
 		case 2: // heater standby temperature
-			reprap.GetGCodes().SetItemStandbyTemperature(itemNumber, (1.0 > currentValue.f) ? -273.15 : currentValue.f);
+			reprap.GetGCodes().SetItemStandbyTemperature(itemNumber, (currentValue.f < 1.0) ? ABS_ZERO : currentValue.f);
 			break;
 
 		case 3: // fan %
@@ -668,7 +657,7 @@ bool ValueMenuItem::Adjust_AlterHelper(int clicks) noexcept
 
 		case 21: // 521 baby stepping
 			{
-				String<SHORT_GCODE_LENGTH> cmd;
+				String<ShortGCodeLength> cmd;
 				cmd.printf("M290 Z%.2f", (double)(0.02 * clicks));
 				(void) reprap.GetGCodes().ProcessCommandFromLcd(cmd.c_str());
 				adjusting = AdjustMode::liveAdjusting;
@@ -678,7 +667,7 @@ bool ValueMenuItem::Adjust_AlterHelper(int clicks) noexcept
 		default:
 			if (itemNumber >= 10 && itemNumber < 10 + reprap.GetGCodes().GetVisibleAxes())	// 510-518 axis position adjustment
 			{
-				String<SHORT_GCODE_LENGTH> cmd;
+				String<ShortGCodeLength> cmd;
 				const float amount = ((itemNumber == 12) ? 0.02 : 0.1) * clicks;			// 0.02mm Z resolution, 0.1mm for other axes
 				cmd.printf("M120 G91 G1 F3000 %c%.2f M121", 'X' + (itemNumber - 10), (double)amount);
 				(void) reprap.GetGCodes().ProcessCommandFromLcd(cmd.c_str());

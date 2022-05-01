@@ -41,10 +41,10 @@ constexpr ObjectModelTableEntry FopDt::objectModelTable[] =
 	{ "standardVoltage",	OBJECT_MODEL_FUNC(self->standardVoltage, 1),										ObjectModelEntryFlags::none },
 
 	// 1. PID members
-	{ "d",					OBJECT_MODEL_FUNC(self->loadChangeParams.tD * self->loadChangeParams.kP, 1),		ObjectModelEntryFlags::none },
-	{ "i",					OBJECT_MODEL_FUNC(self->loadChangeParams.recipTi * self->loadChangeParams.kP, 1),	ObjectModelEntryFlags::none },
+	{ "d",					OBJECT_MODEL_FUNC(self->loadChangeParams.tD * self->loadChangeParams.kP, 3),		ObjectModelEntryFlags::none },
+	{ "i",					OBJECT_MODEL_FUNC(self->loadChangeParams.recipTi * self->loadChangeParams.kP, 4),	ObjectModelEntryFlags::none },
 	{ "overridden",			OBJECT_MODEL_FUNC(self->pidParametersOverridden),									ObjectModelEntryFlags::none },
-	{ "p",					OBJECT_MODEL_FUNC(self->loadChangeParams.kP, 1),									ObjectModelEntryFlags::none },
+	{ "p",					OBJECT_MODEL_FUNC(self->loadChangeParams.kP, 5),									ObjectModelEntryFlags::none },
 	{ "used",				OBJECT_MODEL_FUNC(self->usePid),													ObjectModelEntryFlags::none },
 };
 
@@ -298,14 +298,15 @@ void FopDt::CalcPidConstants(float targetTemperature) noexcept
 {
 	if (!pidParametersOverridden)
 	{
-		// Calculate the cooling rate per degC at this temperature. We assume the fan is off because that is the worst case i.e. longest time constant and less stable.
-		const float averageCoolingRatePerDegc = basicCoolingRate * 0.01 * powf((targetTemperature - NormalAmbientTemperature) * 0.01, coolingRateExponent - 1.0);
+		// Calculate the cooling rate per degC at this temperature. We assume the fan is at 20% speed.
+		const float temperatureRise = max<float>(targetTemperature - NormalAmbientTemperature, 1.0);		// avoid division by zero!
+		const float averageCoolingRatePerDegC = GetCoolingRate(temperatureRise, 0.2)/temperatureRise;
 		loadChangeParams.kP = 0.7/(heatingRate * deadTime);
-		loadChangeParams.recipTi = powf(averageCoolingRatePerDegc, 0.25)/(1.14 * powf(deadTime, 0.75));		// Ti = 1.14 * timeConstant^0.25 * deadTime^0.75 (Ho et al)
+		loadChangeParams.recipTi = powf(averageCoolingRatePerDegC, 0.25)/(1.14 * powf(deadTime, 0.75));		// Ti = 1.14 * timeConstant^0.25 * deadTime^0.75 (Ho et al)
 		loadChangeParams.tD = deadTime * 0.7;
 
 		setpointChangeParams.kP = 0.7/(heatingRate * deadTime);
-		setpointChangeParams.recipTi = powf(averageCoolingRatePerDegc, 0.5)/powf(deadTime, 0.5);			// Ti = timeConstant^0.5 * deadTime^0.5
+		setpointChangeParams.recipTi = powf(averageCoolingRatePerDegC, 0.5)/powf(deadTime, 0.5);			// Ti = timeConstant^0.5 * deadTime^0.5
 		setpointChangeParams.tD = deadTime * 0.7;
 	}
 }
@@ -322,14 +323,16 @@ float FopDt::CorrectPwmForVoltage(float requiredPwm, float actualVoltage) const 
 
 float FopDt::GetPwmCorrectionForFan(float temperatureRise, float fanPwmChange) const noexcept
 {
-	return temperatureRise * 0.01 * fanCoolingRate / heatingRate;
+	return temperatureRise * 0.01 * fanCoolingRate * fanPwmChange / heatingRate;
 }
 
 // Calculate the expected cooling rate for a given temperature rise above ambient
 float FopDt::GetCoolingRate(float temperatureRise, float fanPwm) const noexcept
 {
 	temperatureRise *= 0.01;
-	return basicCoolingRate * powf(temperatureRise, coolingRateExponent) + temperatureRise * fanCoolingRate * fanPwm;
+	// If the temperature rise is negative then we must not try to raise it to a non-integral power!
+	const float adjustedTemperatureRise = (temperatureRise < 0.0) ? -powf(-temperatureRise, coolingRateExponent) : powf(temperatureRise, coolingRateExponent);
+	return basicCoolingRate * adjustedTemperatureRise + temperatureRise * fanCoolingRate * fanPwm;
 }
 
 // Get an estimate of the expected heating rate at the specified temperature rise and PWM. The result may be negative.

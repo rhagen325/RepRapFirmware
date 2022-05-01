@@ -101,11 +101,12 @@ enum class PinUsedBy : uint8_t
 	gpout,
 	filamentMonitor,
 	temporaryInput,
-	sensor
+	sensor,
+	sdCard
 };
 
-#include "Pins.h"
-#include "Configuration.h"
+#include <Config/Pins.h>
+#include <Config/Configuration.h>
 
 static_assert(MinVisibleAxes <= MinAxes);
 static_assert(NumNamedPins <= 255 || sizeof(LogicalPin) > 1, "Need 16-bit logical pin numbers");
@@ -328,11 +329,7 @@ typedef Bitmap<uint32_t> DriversBitmap;			// Type of a bitmap representing a set
 typedef Bitmap<uint32_t> FansBitmap;			// Type of a bitmap representing a set of fan numbers
 typedef Bitmap<uint32_t> HeatersBitmap;			// Type of a bitmap representing a set of heater numbers
 typedef Bitmap<uint16_t> DriverChannelsBitmap;	// Type of a bitmap representing a set of drivers that typically have a common cooling fan
-#if defined(DUET3) || defined(DUET_NG)
 typedef Bitmap<uint32_t> InputPortsBitmap;		// Type of a bitmap representing a set of input ports
-#else
-typedef Bitmap<uint16_t> InputPortsBitmap;		// Type of a bitmap representing a set of input ports
-#endif
 typedef Bitmap<uint32_t> TriggerNumbersBitmap;	// Type of a bitmap representing a set of trigger numbers
 
 #if defined(DUET3) || defined(DUET3MINI)
@@ -383,7 +380,7 @@ extern "C" void debugPrintf(const char* fmt, ...) noexcept __attribute__ ((forma
 
 // Functions and globals not part of any class
 
-double HideNan(float val) noexcept;
+float HideNan(float val) noexcept;
 
 void ListDrivers(const StringRef& str, DriversBitmap drivers) noexcept;
 
@@ -547,7 +544,7 @@ static inline constexpr float InverseConvertAcceleration(float accel) noexcept
 }
 
 constexpr unsigned int MaxFloatDigitsDisplayedAfterPoint = 7;
-const char *_ecv_array GetFloatFormatString(unsigned int numDigitsAfterPoint) noexcept;
+const char *_ecv_array GetFloatFormatString(float val, unsigned int numDigitsAfterPoint) noexcept;
 
 #if SUPPORT_WORKPLACE_COORDINATES
 constexpr size_t NumCoordinateSystems = 9;							// G54 up to G59.3

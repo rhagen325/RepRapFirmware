@@ -168,7 +168,7 @@ bool FilamentMonitor::IsValid(size_t extruderNumber) const noexcept
 		try
 		{
 			const GCodeResult rslt = sensor->Configure(gb, reply, seen);		// configure the sensor (may throw)
-			if (rslt <= GCodeResult::warning)
+			if (Succeeded(rslt))
 			{
 				filamentSensors[extruder] = sensor;
 				reprap.SensorsUpdated();
@@ -335,7 +335,7 @@ bool FilamentMonitor::IsValid(size_t extruderNumber) const noexcept
 					}
 					else
 					{
-						Event::AddEvent(EventType::filament_error, (uint16_t)fst.ToBaseType(), extruder, CanInterface::GetCanAddress(), "");
+						Event::AddEvent(EventType::filament_error, (uint16_t)fst.ToBaseType(), CanInterface::GetCanAddress(), extruder, "");
 					}
 				}
 			}

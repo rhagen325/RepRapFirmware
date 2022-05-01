@@ -51,14 +51,16 @@ struct PrepParams
 	float initialSpeedFraction, finalSpeedFraction;
 #endif
 
+#if SUPPORT_LINEAR_DELTA
 	// Parameters used only for delta moves
 	float initialX, initialY;
-#if SUPPORT_CAN_EXPANSION
+# if SUPPORT_CAN_EXPANSION
 	float finalX, finalY;
 	float zMovement;
-#endif
+# endif
 	const LinearDeltaKinematics *dparams;
 	float a2plusb2;								// sum of the squares of the X and Y movement fractions
+#endif
 
 	// Set up the parameters from the DDA, excluding steadyClocks because that may be affected by input shaping
 	void SetFromDDA(const DDA& dda) noexcept;
@@ -138,10 +140,11 @@ public:
 	bool FetchEndPosition(volatile int32_t ep[MaxAxesPlusExtruders], volatile float endCoords[MaxAxesPlusExtruders]) noexcept;
 	void SetPositions(const float move[]) noexcept;									// Force the endpoints to be these
 	FilePosition GetFilePosition() const noexcept { return filePos; }
-	float GetRequestedSpeed() const noexcept { return requestedSpeed; }
-	float GetTopSpeed() const noexcept { return topSpeed; }
-	float GetAcceleration() const noexcept { return acceleration; }
-	float GetDeceleration() const noexcept { return deceleration; }
+	float GetRequestedSpeedMmPerClock() const noexcept { return requestedSpeed; }
+	float GetRequestedSpeedMmPerSec() const noexcept { return InverseConvertSpeedToMmPerSec(requestedSpeed); }
+	float GetTopSpeedMmPerSec() const noexcept { return InverseConvertSpeedToMmPerSec(topSpeed); }
+	float GetAccelerationMmPerSecSquared() const noexcept { return InverseConvertAcceleration(acceleration); }
+	float GetDecelerationMmPerSecSquared() const noexcept { return InverseConvertAcceleration(deceleration); }
 	float GetVirtualExtruderPosition() const noexcept { return virtualExtruderPosition; }
 	float AdvanceBabyStepping(DDARing& ring, size_t axis, float amount) noexcept;	// Try to push babystepping earlier in the move queue
 	const Tool *GetTool() const noexcept { return tool; }
@@ -182,6 +185,7 @@ public:
 	uint32_t GetStepInterval(size_t axis, uint32_t microstepShift) const noexcept;	// Get the current full step interval for this axis or extruder
 #endif
 
+	DriveMovement *FindDM(size_t drive) const noexcept;								// find the DM for a drive if there is one even if it is completed
 	void CheckEndstops(Platform& platform) noexcept;
 
 	void DebugPrint(const char *tag) const noexcept;								// print the DDA only
@@ -223,15 +227,18 @@ public:
 	static int32_t loggedProbePositions[XYZ_AXES * MaxLoggedProbePositions];
 #endif
 
-	static uint32_t lastStepLowTime;										// when we last completed a step pulse to a slow driver
-	static uint32_t lastDirChangeTime;										// when we last change the DIR signal to a slow driver
+#ifdef DUET3_MB6XD
+	static volatile uint32_t lastStepHighTime;								// when we last started a step pulse
+#else
+	static volatile uint32_t lastStepLowTime;								// when we last completed a step pulse to a slow driver
+#endif
+	static volatile uint32_t lastDirChangeTime;								// when we last change the DIR signal to a slow driver
 
 #if 0	// debug only
 	static uint32_t stepsRequested[NumDirectDrivers], stepsDone[NumDirectDrivers];
 #endif
 
 private:
-	DriveMovement *FindDM(size_t drive) const noexcept;						// find the DM for a drive if there is one even if it is completed
 	DriveMovement *FindActiveDM(size_t drive) const noexcept;				// find the DM for a drive if there is one but only if it is active
 	void RecalculateMove(DDARing& ring) noexcept SPEED_CRITICAL;
 	void MatchSpeeds() noexcept SPEED_CRITICAL;
@@ -268,8 +275,10 @@ private:
 	{
 		struct
 		{
-			uint16_t endCoordinatesValid : 1,		// True if endCoordinates can be relied on
+			uint16_t endCoordinatesValid : 1,		// True if endCoordinates can be relied
+#if SUPPORT_LINEAR_DELTA
 					 isDeltaMovement : 1,			// True if this is a delta printer movement
+#endif
 					 canPauseAfter : 1,				// True if we can pause at the end of this move
 					 isPrintingMove : 1,			// True if this move includes XY movement and extrusion
 					 usePressureAdvance : 1,		// True if pressure advance should be applied to any forward extrusion
@@ -336,7 +345,7 @@ private:
 			static_assert(MaxAxesPlusExtruders <= DriversBitmap::MaxBits());
 #endif
 			// These are used only in delta calculations
-#if !MS_USE_FPU
+#if SUPPORT_LINEAR_DELTA && !MS_USE_FPU
 			int32_t cKc;							// The Z movement fraction multiplied by Kc and converted to integer
 #endif
 		} afterPrepare;
@@ -351,7 +360,7 @@ private:
 	// These three could possibly be moved into afterPrepare
 	DriveMovement* activeDMs;						// list of associated DMs that need steps, in step time order
 	DriveMovement* completedDMs;					// list of associated DMs that don't need any more steps
-	MoveSegment* shapedSegments;						// linked list of move segments used by axis DMs
+	MoveSegment* shapedSegments;					// linked list of move segments used by axis DMs
 	MoveSegment* unshapedSegments;					// linked list of move segments used by extruder DMs
 };
 

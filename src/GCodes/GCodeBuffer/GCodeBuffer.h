@@ -158,6 +158,7 @@ public:
 	bool IsFileFinished() const noexcept;						// Return true if this source has finished execution of a file
 	void SetFileFinished() noexcept;							// Mark the current file as finished
 	void SetPrintFinished() noexcept;							// Mark the current print file as finished
+	void ClosePrintFile() noexcept;								// Close the print file
 
 	bool RequestMacroFile(const char *filename, bool fromCode) noexcept;	// Request execution of a file macro
 	volatile bool IsWaitingForMacro() const noexcept { return isWaitingForMacro; }	// Indicates if the GB is waiting for a macro to be opened
@@ -294,13 +295,11 @@ private:
 	bool timerRunning;									// True if we are waiting
 	bool motionCommanded;								// true if this GCode stream has commanded motion since it last waited for motion to stop
 
-#if HAS_SBC_INTERFACE
-	alignas(4) char buffer[MaxCodeBufferSize];			// must be aligned because we do dword fetches from it
-#else
-	char buffer[GCODE_LENGTH];
-#endif
+	alignas(4) char buffer[MaxGCodeLength];				// must be aligned because in SBC binary mode we do dword fetches from it
 
 #if HAS_SBC_INTERFACE
+	static_assert(MaxGCodeLength >= MaxCodeBufferSize);	// make sure the GCodeBuffer is large enough to hold a command received from the SBC in binary
+
 	// Accessed by both the Main and SBC tasks
 	BinarySemaphore macroSemaphore;
 	volatile bool isWaitingForMacro;	// Is this GB waiting in DoFileMacro?
@@ -367,10 +366,11 @@ inline void GCodeBuffer::AdvanceState() noexcept
 	machineState->AdvanceState();
 }
 
-// Return true if we can queue gcodes from this source. This is the case if a file is being executed
+// Return true if we can queue the current gcode command from this source. This is the case if a file is being executed.
+// We can't queue it if it contains an expression, because the expression value may change or refer to 'iterations'.
 inline bool GCodeBuffer::CanQueueCodes() const noexcept
 {
-	return machineState->DoingFile();
+	return machineState->DoingFile() && !ContainsExpression();
 }
 
 inline bool GCodeBuffer::IsDoingFile() const noexcept
